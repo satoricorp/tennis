@@ -22,13 +22,13 @@ tennis match notes "keep me signed in"
 ## Install
 
 ```bash
-go install github.com/joelachance/tennis/cmd/tennis@latest
+go install github.com/satoricorp/tennis/cmd/tennis@latest
 ```
 
 Or build it:
 
 ```bash
-git clone https://github.com/joelachance/tennis && cd tennis && CGO_ENABLED=0 go build -o tennis ./cmd/tennis
+git clone https://github.com/satoricorp/tennis && cd tennis && CGO_ENABLED=0 go build -o tennis ./cmd/tennis
 ```
 
 `CGO_ENABLED=0` is not a suggestion — it is the whole point. tennis uses a pure-Go SQLite driver and a static embedding model, so the result is one self-contained binary with no shared libraries to find at runtime.
@@ -79,6 +79,8 @@ tennis seed notes ./docs --json               # machine-readable
 ```
 
 Re-running `seed` is an incremental update. Files whose contents and metadata are byte-identical to what is stored are skipped entirely — not re-read into the model, not re-indexed. This is why re-seeding a large corpus after editing one file takes about as long as indexing one file.
+
+`seed` also refuses two kinds of junk, with a note on stderr: files containing binary content (a PDF's raw bytes would index without erroring and quietly pollute every future ranking), and files over 10MB (at that size it's a log or a dataset, not prose).
 
 ### `match` — search
 
@@ -138,7 +140,7 @@ import (
     "fmt"
     "log"
 
-    "github.com/joelachance/tennis"
+    "github.com/satoricorp/tennis"
 )
 
 func main() {
@@ -398,6 +400,7 @@ your text
 - **Not a reranker.** Results come from BM25 and cosine fused; there is no cross-encoder pass.
 - **Not a relevance threshold.** Semantic search ranks everything, so a query always returns up to `TopK` results even when nothing is a good match. Use the score and the `kw#/sem#` tags to judge; a result found by only one ranker with a low score is usually noise.
 - **Not multimodal.** Text only.
+- **Not good at CJK keyword search.** The FTS5 tokenizer does not segment Chinese/Japanese/Korean, so the keyword ranker finds nothing for CJK queries; semantic search still works. Fixing this properly (a trigram tokenizer) changes the index schema, so it is tracked as an issue rather than patched quietly.
 
 ---
 
@@ -410,6 +413,10 @@ CGO_ENABLED=0 go build -o tennis ./cmd/tennis
 ```
 
 The embedder has a correctness test that compares its output against the reference Python `model2vec` implementation vector-for-vector — cosine 1.00000000, max absolute difference 8e-9. A pooling bug or a vocabulary off-by-one produces embeddings that are merely mediocre rather than obviously broken, so this is checked against ground truth rather than eyeballed.
+
+Model downloads are verified against SHA-256 checksums pinned in the source; a changed upstream file is refused rather than silently embedded into every vector the install ever produces.
+
+Tests that need the 123MB model weights skip themselves when the weights are absent, so CI runs green without downloading them; the full suite (including the reference validation and fuzzing) runs wherever the weights exist.
 
 ## License
 

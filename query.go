@@ -185,9 +185,13 @@ func (n *Namespace) semanticSearch(ctx context.Context, q Query, filterSQL strin
 	}
 	qv := vecs[0]
 
+	// Pass 1 scans vectors only. Chunk TEXT stays on disk: the scan touches
+	// every chunk in the namespace, but only the winners' text is ever shown,
+	// and dragging the entire corpus's prose through RAM per query is the
+	// difference between scaling to 500k chunks and not.
 	args := append([]any{n.name}, filterArgs...)
 	rows, err := n.db.sql.QueryContext(ctx, `
-		SELECT c.doc_id, c.text, c.vec
+		SELECT c.id, c.doc_id, c.vec
 		FROM chunks c
 		JOIN docs  d ON d.ns = c.ns AND d.id = c.doc_id
 		WHERE c.ns = ?`+filterSQL, args...)
@@ -197,22 +201,23 @@ func (n *Namespace) semanticSearch(ctx context.Context, q Query, filterSQL strin
 	defer rows.Close()
 
 	type scored struct {
-		docID string
-		text  string
-		score float64
+		chunkID int64
+		docID   string
+		score   float64
 	}
 	var all []scored
 	for rows.Next() {
-		var docID, text string
+		var chunkID int64
+		var docID string
 		var blob []byte
-		if err := rows.Scan(&docID, &text, &blob); err != nil {
+		if err := rows.Scan(&chunkID, &docID, &blob); err != nil {
 			return nil, err
 		}
 		v, err := decodeVector(blob, n.dims)
 		if err != nil {
 			return nil, err
 		}
-		all = append(all, scored{docID, text, dot(qv, v)})
+		all = append(all, scored{chunkID, docID, dot(qv, v)})
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
@@ -221,16 +226,48 @@ func (n *Namespace) semanticSearch(ctx context.Context, q Query, filterSQL strin
 	sort.Slice(all, func(i, j int) bool { return all[i].score > all[j].score })
 
 	seen := make(map[string]bool)
-	var out []candidate
+	var winners []scored
 	for _, s := range all {
 		if seen[s.docID] {
 			continue // keep only each document's best chunk
 		}
 		seen[s.docID] = true
-		out = append(out, candidate{docID: s.docID, rank: len(out) + 1, text: s.text})
-		if len(out) >= q.CandidateDepth {
+		winners = append(winners, s)
+		if len(winners) >= q.CandidateDepth {
 			break
 		}
+	}
+	if len(winners) == 0 {
+		return nil, nil
+	}
+
+	// Pass 2 fetches text for just the winning chunks.
+	ph := strings.TrimSuffix(strings.Repeat("?,", len(winners)), ",")
+	textArgs := make([]any, len(winners))
+	for i, w := range winners {
+		textArgs[i] = w.chunkID
+	}
+	textRows, err := n.db.sql.QueryContext(ctx, `SELECT id, text FROM chunks WHERE id IN (`+ph+`)`, textArgs...)
+	if err != nil {
+		return nil, err
+	}
+	defer textRows.Close()
+	texts := make(map[int64]string, len(winners))
+	for textRows.Next() {
+		var id int64
+		var text string
+		if err := textRows.Scan(&id, &text); err != nil {
+			return nil, err
+		}
+		texts[id] = text
+	}
+	if err := textRows.Err(); err != nil {
+		return nil, err
+	}
+
+	out := make([]candidate, len(winners))
+	for i, w := range winners {
+		out[i] = candidate{docID: w.docID, rank: i + 1, text: texts[w.chunkID]}
 	}
 	return out, nil
 }

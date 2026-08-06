@@ -12,6 +12,11 @@ import (
 // eyeballable: a wrong pooling or an off-by-one in the vocab produces vectors
 // that are merely mediocre, never obviously broken.
 func TestAgainstReference(t *testing.T) {
+	if _, err := os.Stat("../testdata/model.safetensors"); err != nil {
+		// Weights are gitignored (123MB); CI runs without them. The reference
+		// comparison still guards local development, where they exist.
+		t.Skip("model weights not present in testdata; skipping reference validation")
+	}
 	spec := Builtins["potion-retrieval-32M"]
 	s, err := NewStatic(spec, "../testdata/model.safetensors", "../testdata/tokenizer.json")
 	if err != nil {

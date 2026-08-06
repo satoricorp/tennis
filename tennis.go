@@ -22,7 +22,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/joelachance/tennis/embed"
+	"github.com/satoricorp/tennis/embed"
 	_ "modernc.org/sqlite" // pure-Go driver: no cgo, so the binary stays static
 )
 

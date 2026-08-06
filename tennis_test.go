@@ -10,7 +10,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/joelachance/tennis/embed"
+	"github.com/satoricorp/tennis/embed"
 )
 
 // The tests point TENNIS_CACHE at a checked-out copy of the model so they

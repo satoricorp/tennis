@@ -9,7 +9,7 @@ import (
 	"fmt"
 	"math"
 
-	"github.com/joelachance/tennis/embed"
+	"github.com/satoricorp/tennis/embed"
 )
 
 // Namespace is an isolated collection of documents with one bound embedder.
@@ -67,6 +67,27 @@ func (n *Namespace) Write(ctx context.Context, docs []Document) (*WriteResult, e
 		allChunks []string
 	)
 
+	// One query for every stored hash in the namespace, instead of one query
+	// per incoming document. A namespace's (id, hash) pairs are tiny — even a
+	// hundred thousand documents fit in a few MB — and this is the difference
+	// between a 10k-file re-seed doing 1 round trip or 10,000.
+	existing := make(map[string]string)
+	hashRows, err := n.db.sql.QueryContext(ctx, `SELECT id, hash FROM docs WHERE ns = ?`, n.name)
+	if err != nil {
+		return nil, err
+	}
+	for hashRows.Next() {
+		var id, h string
+		if err := hashRows.Scan(&id, &h); err != nil {
+			hashRows.Close()
+			return nil, err
+		}
+		existing[id] = h
+	}
+	if err := hashRows.Close(); err != nil {
+		return nil, err
+	}
+
 	for _, d := range docs {
 		if d.ID == "" {
 			return nil, fmt.Errorf("document has an empty ID")
@@ -82,12 +103,7 @@ func (n *Namespace) Write(ctx context.Context, docs []Document) (*WriteResult, e
 		sum := sha256.Sum256([]byte(d.Text + "\x00" + attrs))
 		hash := hex.EncodeToString(sum[:])
 
-		var existing string
-		err := n.db.sql.QueryRowContext(ctx, `SELECT hash FROM docs WHERE ns = ? AND id = ?`, n.name, d.ID).Scan(&existing)
-		if err != nil && err != sql.ErrNoRows {
-			return nil, err
-		}
-		if err == nil && existing == hash {
+		if existing[d.ID] == hash {
 			res.Skipped++
 			continue
 		}

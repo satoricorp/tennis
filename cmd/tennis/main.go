@@ -20,8 +20,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/joelachance/tennis"
-	"github.com/joelachance/tennis/embed"
+	"github.com/satoricorp/tennis"
+	"github.com/satoricorp/tennis/embed"
 )
 
 const usage = `tennis — local hybrid search. Keyword + semantic, one file, no server.
@@ -81,7 +81,9 @@ func main() {
 	}
 }
 
-const version = "0.1.0"
+// version is stamped by the release build (-ldflags "-X main.version=...");
+// a from-source build reports dev.
+var version = "dev"
 
 // parseInterleaved parses args allowing flags before, between, or after
 // positional arguments, returning the positionals in order.
@@ -189,6 +191,13 @@ func cmdSeed(args []string) error {
 	}
 
 	var docs []tennis.Document
+	skippedFiles := 0
+	skip := func(p, why string) {
+		skippedFiles++
+		if !*asJSON {
+			fmt.Fprintf(os.Stderr, "tennis: skipping %s (%s)\n", p, why)
+		}
+	}
 	for _, root := range paths {
 		err := filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
 			if err != nil || d.IsDir() {
@@ -197,16 +206,29 @@ func cmdSeed(args []string) error {
 			if len(wanted) > 0 && !wanted[filepath.Ext(p)] {
 				return nil
 			}
+			info, err := d.Info()
+			if err != nil {
+				return err
+			}
+			// The size cap runs before the read, so a stray multi-GB log
+			// costs a stat rather than a slurp.
+			if info.Size() > maxSeedFileSize {
+				skip(p, fmt.Sprintf("%.1fMB is over the %dMB cap", float64(info.Size())/(1<<20), maxSeedFileSize/(1<<20)))
+				return nil
+			}
 			body, err := os.ReadFile(p)
 			if err != nil {
 				return err
 			}
+			if isBinary(body) {
+				skip(p, "binary content")
+				return nil
+			}
 			abs, _ := filepath.Abs(p)
-			info, _ := d.Info()
-			attrs := map[string]any{"path": abs, "name": d.Name()}
-			if info != nil {
-				attrs["modified"] = info.ModTime().UTC().Format(time.RFC3339)
-				attrs["size"] = info.Size()
+			attrs := map[string]any{
+				"path": abs, "name": d.Name(),
+				"modified": info.ModTime().UTC().Format(time.RFC3339),
+				"size":     info.Size(),
 			}
 			docs = append(docs, tennis.Document{ID: abs, Text: string(body), Attributes: attrs})
 			return nil
@@ -216,7 +238,7 @@ func cmdSeed(args []string) error {
 		}
 	}
 	if len(docs) == 0 {
-		return fmt.Errorf("no matching files under %s (looking for %s)", strings.Join(paths, ", "), *ext)
+		return fmt.Errorf("no indexable files under %s (looking for %s, %d skipped)", strings.Join(paths, ", "), *ext, skippedFiles)
 	}
 
 	res, err := ns.Write(ctx, docs)
@@ -224,10 +246,36 @@ func cmdSeed(args []string) error {
 		return err
 	}
 	if *asJSON {
-		return emit(res)
+		return emit(map[string]any{"written": res.Written, "skipped": res.Skipped, "chunks": res.Chunks, "skipped_files": skippedFiles})
 	}
-	fmt.Printf("seeded %d, skipped %d unchanged, %d chunks in %q\n", res.Written, res.Skipped, res.Chunks, nsName)
+	fmt.Printf("seeded %d, skipped %d unchanged, %d chunks in %q", res.Written, res.Skipped, res.Chunks, nsName)
+	if skippedFiles > 0 {
+		fmt.Printf(" (%d files skipped)", skippedFiles)
+	}
+	fmt.Println()
 	return nil
+}
+
+// maxSeedFileSize bounds what seed will read. Files past this are almost never
+// prose someone wants ranked — they are logs, dumps, and datasets — and one of
+// them would dominate both embedding time and the index.
+const maxSeedFileSize = 10 << 20
+
+// isBinary reports whether content looks like something other than text, using
+// the same heuristic git uses: a NUL byte in the leading window. Indexing a
+// PDF's raw bytes never errors — it just quietly pollutes every future ranking
+// with garbage chunks, which is worse.
+func isBinary(content []byte) bool {
+	window := content
+	if len(window) > 8192 {
+		window = window[:8192]
+	}
+	for _, b := range window {
+		if b == 0 {
+			return true
+		}
+	}
+	return false
 }
 
 func cmdMatch(args []string) error {

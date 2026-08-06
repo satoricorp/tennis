@@ -5,7 +5,7 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/joelachance/tennis"
+	"github.com/satoricorp/tennis"
 )
 
 // newTestFS builds a FlagSet mirroring the real subcommands' flags but with

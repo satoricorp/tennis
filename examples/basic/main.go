@@ -8,7 +8,7 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/joelachance/tennis"
+	"github.com/satoricorp/tennis"
 )
 
 func main() {

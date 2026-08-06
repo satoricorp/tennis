@@ -1,4 +1,4 @@
-module github.com/joelachance/tennis
+module github.com/satoricorp/tennis
 
 go 1.25.0
 
