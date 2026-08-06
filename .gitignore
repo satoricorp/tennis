@@ -1,0 +1,6 @@
+/testdata/model.safetensors
+/testdata/tokenizer.json
+/testdata/cache/
+/testdata/go_vectors.json
+/tennis
+/dist/
