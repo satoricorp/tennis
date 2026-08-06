@@ -230,7 +230,10 @@ type NamespaceInfo struct {
 	Chunks     int    `json:"chunks"`
 }
 
-// DropNamespace deletes a namespace and everything in it.
+// DropNamespace deletes a namespace and everything in it. Dropping a
+// namespace that does not exist is an error, not a no-op: "dropped" printed
+// for a typo would leave the real namespace intact while telling the user the
+// opposite.
 func (d *DB) DropNamespace(ctx context.Context, name string) error {
 	tx, err := d.sql.BeginTx(ctx, nil)
 	if err != nil {
@@ -240,14 +243,18 @@ func (d *DB) DropNamespace(ctx context.Context, name string) error {
 
 	// Chunks go through DELETE rather than a bulk drop so the FTS triggers fire
 	// and the index does not keep serving rows that no longer exist.
-	for _, stmt := range []string{
-		`DELETE FROM chunks WHERE ns = ?`,
-		`DELETE FROM docs WHERE ns = ?`,
-		`DELETE FROM namespaces WHERE name = ?`,
-	} {
-		if _, err := tx.ExecContext(ctx, stmt, name); err != nil {
-			return err
-		}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM chunks WHERE ns = ?`, name); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM docs WHERE ns = ?`, name); err != nil {
+		return err
+	}
+	res, err := tx.ExecContext(ctx, `DELETE FROM namespaces WHERE name = ?`, name)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return fmt.Errorf("namespace %q: %w", name, ErrNamespaceNotFound)
 	}
 	return tx.Commit()
 }

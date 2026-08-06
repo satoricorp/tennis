@@ -17,6 +17,15 @@ var OpenAIModels = map[string]int{
 	"text-embedding-3-large": 3072,
 }
 
+// openaiMaxBatch is the most inputs the embeddings endpoint accepts in one
+// request. Without splitting, the first large seed on an OpenAI namespace
+// would simply error after the user had already waited on chunking.
+const openaiMaxBatch = 2048
+
+// openaiMaxAttempts bounds retries on 429/5xx/network failures; waits double
+// between attempts (1s, 2s, 4s).
+const openaiMaxAttempts = 4
+
 // OpenAI embeds via the OpenAI API. It is never selected automatically.
 //
 // The temptation is to check for OPENAI_API_KEY and quietly use it when
@@ -33,6 +42,11 @@ type OpenAI struct {
 	key    string
 	dims   int
 	client *http.Client
+
+	// Overridable in tests; production values set by NewOpenAI.
+	baseURL   string
+	maxBatch  int
+	retryWait time.Duration
 }
 
 // NewOpenAI builds an OpenAI embedder. The key is read from OPENAI_API_KEY, but
@@ -52,10 +66,13 @@ func NewOpenAI(model string) (*OpenAI, error) {
 		return nil, fmt.Errorf("openai embedder requested but OPENAI_API_KEY is not set")
 	}
 	return &OpenAI{
-		model:  model,
-		key:    key,
-		dims:   dims,
-		client: &http.Client{Timeout: 60 * time.Second},
+		model:     model,
+		key:       key,
+		dims:      dims,
+		client:    &http.Client{Timeout: 60 * time.Second},
+		baseURL:   "https://api.openai.com/v1/embeddings",
+		maxBatch:  openaiMaxBatch,
+		retryWait: time.Second,
 	}, nil
 }
 
@@ -77,39 +94,82 @@ type openAIResponse struct {
 	} `json:"error"`
 }
 
+// Embed splits texts into API-sized batches and retries transient failures.
 func (o *OpenAI) Embed(ctx context.Context, texts []string) ([][]float32, error) {
 	if len(texts) == 0 {
 		return nil, nil
 	}
+	out := make([][]float32, 0, len(texts))
+	for start := 0; start < len(texts); start += o.maxBatch {
+		end := min(start+o.maxBatch, len(texts))
+		vecs, err := o.embedBatch(ctx, texts[start:end])
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, vecs...)
+	}
+	return out, nil
+}
+
+// embedBatch sends one request, retrying rate limits, server errors, and
+// network failures with doubling waits. 4xx other than 429 is not retried —
+// a bad key or a malformed request will not get better by asking again.
+func (o *OpenAI) embedBatch(ctx context.Context, texts []string) ([][]float32, error) {
+	var lastErr error
+	for attempt := 0; attempt < openaiMaxAttempts; attempt++ {
+		if attempt > 0 {
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-time.After(o.retryWait << (attempt - 1)):
+			}
+		}
+		vecs, retryable, err := o.doRequest(ctx, texts)
+		if err == nil {
+			return vecs, nil
+		}
+		if !retryable {
+			return nil, err
+		}
+		lastErr = err
+	}
+	return nil, fmt.Errorf("openai: giving up after %d attempts: %w", openaiMaxAttempts, lastErr)
+}
+
+func (o *OpenAI) doRequest(ctx context.Context, texts []string) (vecs [][]float32, retryable bool, err error) {
 	body, err := json.Marshal(openAIRequest{Input: texts, Model: o.model})
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "https://api.openai.com/v1/embeddings", bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, o.baseURL, bytes.NewReader(body))
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+o.key)
 
 	resp, err := o.client.Do(req)
 	if err != nil {
-		return nil, err
+		return nil, true, err // network failure: worth retrying
 	}
 	defer resp.Body.Close()
 
+	if resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode >= 500 {
+		return nil, true, fmt.Errorf("openai: HTTP %d", resp.StatusCode)
+	}
+
 	var parsed openAIResponse
 	if err := json.NewDecoder(resp.Body).Decode(&parsed); err != nil {
-		return nil, fmt.Errorf("decoding openai response (HTTP %d): %w", resp.StatusCode, err)
+		return nil, false, fmt.Errorf("decoding openai response (HTTP %d): %w", resp.StatusCode, err)
 	}
 	if parsed.Error != nil {
-		return nil, fmt.Errorf("openai: %s", parsed.Error.Message)
+		return nil, false, fmt.Errorf("openai: %s", parsed.Error.Message)
 	}
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("openai: HTTP %d", resp.StatusCode)
+		return nil, false, fmt.Errorf("openai: HTTP %d", resp.StatusCode)
 	}
 	if len(parsed.Data) != len(texts) {
-		return nil, fmt.Errorf("openai returned %d embeddings for %d inputs", len(parsed.Data), len(texts))
+		return nil, false, fmt.Errorf("openai returned %d embeddings for %d inputs", len(parsed.Data), len(texts))
 	}
 
 	// The API documents that it may return items out of order, so place each by
@@ -117,17 +177,17 @@ func (o *OpenAI) Embed(ctx context.Context, texts []string) ([][]float32, error)
 	out := make([][]float32, len(texts))
 	for _, d := range parsed.Data {
 		if d.Index < 0 || d.Index >= len(out) {
-			return nil, fmt.Errorf("openai returned out-of-range index %d", d.Index)
+			return nil, false, fmt.Errorf("openai returned out-of-range index %d", d.Index)
 		}
 		if len(d.Embedding) != o.dims {
-			return nil, fmt.Errorf("openai returned %d dims, expected %d", len(d.Embedding), o.dims)
+			return nil, false, fmt.Errorf("openai returned %d dims, expected %d", len(d.Embedding), o.dims)
 		}
 		out[d.Index] = normalize(d.Embedding)
 	}
 	for i, v := range out {
 		if v == nil {
-			return nil, fmt.Errorf("openai returned no embedding for input %d", i)
+			return nil, false, fmt.Errorf("openai returned no embedding for input %d", i)
 		}
 	}
-	return out, nil
+	return out, false, nil
 }

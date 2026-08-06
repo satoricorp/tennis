@@ -419,3 +419,66 @@ func TestKeywordSearchSpeaksUnicode(t *testing.T) {
 		t.Errorf(`keyword query "café": want [fr], got %v`, ids(res))
 	}
 }
+
+// Regression: dropping a namespace that does not exist used to succeed
+// silently — "dropped" printed for a typo, real namespace untouched.
+func TestDropMissingNamespaceErrors(t *testing.T) {
+	db := openTest(t)
+	ctx := context.Background()
+
+	err := db.DropNamespace(ctx, "never-existed")
+	if !errors.Is(err, ErrNamespaceNotFound) {
+		t.Errorf("want ErrNamespaceNotFound, got: %v", err)
+	}
+
+	// And a real drop still works exactly once.
+	if _, err := db.CreateNamespace(ctx, "real", NamespaceOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.DropNamespace(ctx, "real"); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.DropNamespace(ctx, "real"); !errors.Is(err, ErrNamespaceNotFound) {
+		t.Errorf("second drop should be not-found, got: %v", err)
+	}
+}
+
+// Regression: keyword candidates used to be limited by CHUNK count before
+// collapsing to documents, while the semantic side counted documents. One
+// chunky document could eat the whole keyword budget, quietly tilting every
+// hybrid ranking toward whatever the semantic ranker liked.
+func TestKeywordCandidatesCountDocumentsNotChunks(t *testing.T) {
+	db := openTest(t)
+	ctx := context.Background()
+	ns, err := db.CreateNamespace(ctx, "docs", NamespaceOptions{ChunkSize: 60, ChunkOverlap: 0})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// "big" produces many chunks that all contain the term; b and c one each.
+	big := strings.Repeat("the zebra runs across the plain today. ", 20)
+	if _, err := ns.Write(ctx, []Document{
+		{ID: "big", Text: big},
+		{ID: "b", Text: "a zebra sleeps in the shade"},
+		{ID: "c", Text: "zebra stripes form a pattern"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Sanity: the setup really does give "big" more chunks than the depth.
+	var chunkCount int
+	if err := db.sql.QueryRow(`SELECT COUNT(*) FROM chunks WHERE ns='docs' AND doc_id='big'`).Scan(&chunkCount); err != nil {
+		t.Fatal(err)
+	}
+	if chunkCount <= 3 {
+		t.Fatalf("setup: big has only %d chunks; the regression needs more than the candidate depth", chunkCount)
+	}
+
+	res, err := ns.Query(ctx, Query{Text: "zebra", Mode: Keyword, TopK: 10, CandidateDepth: 3})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res) != 3 {
+		t.Errorf("depth 3 must yield 3 DOCUMENTS, got %d: %v (old code: all 3 slots eaten by 'big')",
+			len(res), ids(res))
+	}
+}

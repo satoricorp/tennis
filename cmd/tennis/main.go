@@ -97,12 +97,21 @@ func parseInterleaved(fs *flag.FlagSet, args []string) ([]string, error) {
 		if err := fs.Parse(args); err != nil {
 			return nil, err
 		}
-		args = fs.Args()
-		if len(args) == 0 {
+		rest := fs.Args()
+		// "--" must stay terminal across iterations. flag.Parse consumes it,
+		// but this loop re-Parses the remainder, which would resurrect
+		// flag-looking positionals after it ("match ns -- a -n" would try to
+		// parse -n again). fs.Args() is always a tail of the input, so if the
+		// token just before that tail was "--", Parse stopped there and
+		// everything left is positional by declaration.
+		if consumed := len(args) - len(rest); consumed > 0 && args[consumed-1] == "--" {
+			return append(pos, rest...), nil
+		}
+		if len(rest) == 0 {
 			return pos, nil
 		}
-		pos = append(pos, args[0])
-		args = args[1:]
+		pos = append(pos, rest[0])
+		args = rest[1:]
 	}
 }
 

@@ -128,22 +128,48 @@ func (n *Namespace) keywordSearch(ctx context.Context, q Query, filterSQL string
 	args := append([]any{match, n.name}, filterArgs...)
 	args = append(args, q.CandidateDepth)
 
-	// The FTS table is not aliased: an alias is not a valid MATCH target, and
-	// "rank" only resolves against the real table name.
+	// Collapse chunks to documents in SQL so that LIMIT counts DOCUMENTS.
+	// Limiting raw chunk rows would let one chunky document eat the whole
+	// candidate budget while the semantic side counts documents — a quiet
+	// systematic bias in every hybrid ranking.
+	//
+	// rank is an FTS5 auxiliary column, only valid in a query whose FROM is
+	// the FTS table itself. A plain subquery is NOT enough: the planner
+	// flattens it into the outer join and the auxiliary context is gone
+	// ("unable to use function bm25 in the requested context"). MATERIALIZED
+	// forbids the flattening by contract rather than by planner mood.
+	//
+	// The outer bare c.text column rides SQLite's documented MIN() behaviour:
+	// with exactly one aggregate MIN/MAX in the SELECT, bare columns come from
+	// the row that produced the extreme — each document's best-scoring chunk.
+	// rank is more negative for better matches, so MIN picks the best.
 	rows, err := n.db.sql.QueryContext(ctx, `
-		SELECT c.doc_id, c.text
-		FROM chunks_fts
-		JOIN chunks c ON c.id = chunks_fts.rowid
+		WITH f AS MATERIALIZED (
+			SELECT rowid, rank AS score FROM chunks_fts WHERE chunks_fts MATCH ?
+		)
+		SELECT c.doc_id, c.text, MIN(f.score) AS best
+		FROM f
+		JOIN chunks c ON c.id = f.rowid
 		JOIN docs   d ON d.ns = c.ns AND d.id = c.doc_id
-		WHERE chunks_fts MATCH ? AND c.ns = ?`+filterSQL+`
-		ORDER BY chunks_fts.rank
+		WHERE c.ns = ?`+filterSQL+`
+		GROUP BY c.doc_id
+		ORDER BY best
 		LIMIT ?`, args...)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 
-	return collapseToDocuments(rows)
+	var out []candidate
+	for rows.Next() {
+		var docID, text string
+		var best float64
+		if err := rows.Scan(&docID, &text, &best); err != nil {
+			return nil, err
+		}
+		out = append(out, candidate{docID: docID, rank: len(out) + 1, text: text})
+	}
+	return out, rows.Err()
 }
 
 // semanticSearch scores every chunk in the namespace by cosine similarity.
@@ -277,28 +303,6 @@ func (n *Namespace) fuse(ctx context.Context, q Query, keyword, semantic []candi
 		}
 	}
 	return results, nil
-}
-
-// collapseToDocuments keeps the first (best-ranked) chunk per document.
-func collapseToDocuments(rows interface {
-	Next() bool
-	Scan(...any) error
-	Err() error
-}) ([]candidate, error) {
-	seen := make(map[string]bool)
-	var out []candidate
-	for rows.Next() {
-		var docID, text string
-		if err := rows.Scan(&docID, &text); err != nil {
-			return nil, err
-		}
-		if seen[docID] {
-			continue
-		}
-		seen[docID] = true
-		out = append(out, candidate{docID: docID, rank: len(out) + 1, text: text})
-	}
-	return out, rows.Err()
 }
 
 func dot(a, b []float32) float64 {
