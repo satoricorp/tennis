@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 )
 
 // Mode selects which rankers run.
@@ -327,12 +329,17 @@ var stopWords = map[string]bool{
 // mattered, while requiring every term would drop documents the semantic side
 // could have rescued. Every term is quoted so that FTS5 operators typed by a
 // user ("NEAR", "*", "-") are treated as text rather than syntax.
+//
+// Term characters are any Unicode letter or digit, matching the unicode61
+// tokenizer that built the index. An ASCII-only rule here would shred "café"
+// into garbage and reduce non-Latin queries to nothing — silently disabling
+// the keyword half of the hybrid for every language but English.
 func buildFTSQuery(text string) string {
 	var terms []string
 	for _, w := range strings.FieldsFunc(strings.ToLower(text), func(r rune) bool {
-		return !('a' <= r && r <= 'z') && !('0' <= r && r <= '9') && r != '_'
+		return !unicode.IsLetter(r) && !unicode.IsDigit(r) && r != '_'
 	}) {
-		if len(w) < 2 || stopWords[w] {
+		if utf8.RuneCountInString(w) < 2 || stopWords[w] {
 			continue
 		}
 		terms = append(terms, `"`+w+`"`)

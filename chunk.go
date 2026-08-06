@@ -1,6 +1,9 @@
 package tennis
 
-import "strings"
+import (
+	"strings"
+	"unicode/utf8"
+)
 
 const (
 	defaultChunkSize    = 1000
@@ -47,7 +50,9 @@ func chunkText(text string, size, overlap int) []string {
 		if s := strings.TrimSpace(text[start:end]); s != "" {
 			out = append(out, s)
 		}
-		next := end - overlap
+		// The overlap step is byte arithmetic, so it can land inside a
+		// multi-byte rune; align it back to a rune start before slicing there.
+		next := alignRune(text, end-overlap)
 		if next <= start {
 			// Pathological input (no break points, tiny window): step forward
 			// rather than loop forever producing the same chunk.
@@ -61,6 +66,11 @@ func chunkText(text string, size, overlap int) []string {
 // breakPoint finds a natural split at or before end, searching back through the
 // last quarter of the window. Beyond that the chunks get too ragged, so it
 // gives up and cuts mid-word rather than emitting a stub.
+//
+// The separators are all ASCII, so a match is always a rune boundary; only the
+// give-up path needs explicit alignment. Without it, size is byte arithmetic
+// and the cut can land inside a multi-byte rune, storing invalid UTF-8 —
+// invisible on English corpora, near-universal on anything else.
 func breakPoint(text string, start, end int) int {
 	limit := end - (end-start)/4
 	for _, sep := range []string{"\n\n", ". ", "\n", " "} {
@@ -68,5 +78,20 @@ func breakPoint(text string, start, end int) int {
 			return start + i + len(sep)
 		}
 	}
-	return end
+	if aligned := alignRune(text, end); aligned > start {
+		return aligned
+	}
+	// The window is narrower than one rune (size < 4 with a 4-byte rune at
+	// start): emit that whole rune rather than looping or splitting it.
+	_, w := utf8.DecodeRuneInString(text[start:])
+	return start + w
+}
+
+// alignRune moves i back to the start of the rune it points into. UTF-8
+// continuation bytes are self-identifying, so this is at most a 3-byte walk.
+func alignRune(s string, i int) int {
+	for i > 0 && i < len(s) && !utf8.RuneStart(s[i]) {
+		i--
+	}
+	return i
 }

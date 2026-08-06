@@ -10,6 +10,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io/fs"
@@ -82,6 +83,29 @@ func main() {
 
 const version = "0.1.0"
 
+// parseInterleaved parses args allowing flags before, between, or after
+// positional arguments, returning the positionals in order.
+//
+// Go's flag package stops at the first non-flag token, so with a plain Parse,
+// `tennis ns create cloud --openai X` silently ignores --openai — and then
+// creates a namespace permanently bound to the wrong embedder. A flag that is
+// dropped rather than rejected is the worst kind of CLI bug, because the
+// command still "works".
+func parseInterleaved(fs *flag.FlagSet, args []string) ([]string, error) {
+	var pos []string
+	for {
+		if err := fs.Parse(args); err != nil {
+			return nil, err
+		}
+		args = fs.Args()
+		if len(args) == 0 {
+			return pos, nil
+		}
+		pos = append(pos, args[0])
+		args = args[1:]
+	}
+}
+
 // defaultDB resolves the database path from the flag, the environment, or the
 // conventional location, in that order.
 func defaultDB() string {
@@ -112,12 +136,14 @@ func cmdSeed(args []string) error {
 	model := fs_.String("model", "", "built-in model for a new namespace (default "+embed.DefaultModel+")")
 	openaiModel := fs_.String("openai", "", "use an OpenAI model instead of the built-in one (requires OPENAI_API_KEY)")
 	chunkSize := fs_.Int("chunk", 0, "chunk size in characters for a new namespace")
-	fs_.Parse(args)
-
-	if fs_.NArg() < 2 {
+	pos, err := parseInterleaved(fs_, args)
+	if err != nil {
+		return err
+	}
+	if len(pos) < 2 {
 		return fmt.Errorf("usage: tennis seed <namespace> <path...>")
 	}
-	nsName, paths := fs_.Arg(0), fs_.Args()[1:]
+	nsName, paths := pos[0], pos[1:]
 
 	db, err := open(*dbPath, *asJSON)
 	if err != nil {
@@ -127,7 +153,8 @@ func cmdSeed(args []string) error {
 	ctx := context.Background()
 
 	ns, err := db.Namespace(ctx, nsName)
-	if err != nil {
+	switch {
+	case errors.Is(err, tennis.ErrNamespaceNotFound):
 		// Creating on first seed is the ergonomic choice, and it is safe
 		// because the embedder is bound here and enforced forever after.
 		ns, err = db.CreateNamespace(ctx, nsName, tennis.NamespaceOptions{
@@ -139,6 +166,10 @@ func cmdSeed(args []string) error {
 		if !*asJSON {
 			fmt.Fprintf(os.Stderr, "tennis: created namespace %q bound to %s\n", nsName, ns.EmbedderID())
 		}
+	case err != nil:
+		// Any other failure — a missing OPENAI_API_KEY, a model mismatch — must
+		// surface as itself, not as "already exists" from a doomed create.
+		return err
 	}
 
 	wanted := map[string]bool{}
@@ -197,13 +228,15 @@ func cmdMatch(args []string) error {
 	topK := fs_.Int("n", 10, "how many results")
 	mode := fs_.String("mode", "hybrid", "hybrid | keyword | semantic")
 	where := fs_.String("where", "", "attribute filter, e.g. status=merged (repeat with commas)")
-	fs_.Parse(args)
-
-	if fs_.NArg() < 2 {
+	pos, err := parseInterleaved(fs_, args)
+	if err != nil {
+		return err
+	}
+	if len(pos) < 2 {
 		return fmt.Errorf("usage: tennis match <namespace> <query>")
 	}
-	nsName := fs_.Arg(0)
-	query := strings.Join(fs_.Args()[1:], " ")
+	nsName := pos[0]
+	query := strings.Join(pos[1:], " ")
 
 	db, err := open(*dbPath, *asJSON)
 	if err != nil {
@@ -255,8 +288,11 @@ func cmdGet(args []string) error {
 	fs_ := flag.NewFlagSet("get", flag.ExitOnError)
 	dbPath := fs_.String("db", defaultDB(), "database file")
 	asJSON := fs_.Bool("json", false, "machine-readable output")
-	fs_.Parse(args)
-	if fs_.NArg() != 2 {
+	pos, err := parseInterleaved(fs_, args)
+	if err != nil {
+		return err
+	}
+	if len(pos) != 2 {
 		return fmt.Errorf("usage: tennis get <namespace> <id>")
 	}
 	db, err := open(*dbPath, true)
@@ -265,11 +301,11 @@ func cmdGet(args []string) error {
 	}
 	defer db.Close()
 	ctx := context.Background()
-	ns, err := db.Namespace(ctx, fs_.Arg(0))
+	ns, err := db.Namespace(ctx, pos[0])
 	if err != nil {
 		return err
 	}
-	doc, err := ns.Get(ctx, fs_.Arg(1))
+	doc, err := ns.Get(ctx, pos[1])
 	if err != nil {
 		return err
 	}
@@ -284,8 +320,11 @@ func cmdRm(args []string) error {
 	fs_ := flag.NewFlagSet("rm", flag.ExitOnError)
 	dbPath := fs_.String("db", defaultDB(), "database file")
 	asJSON := fs_.Bool("json", false, "machine-readable output")
-	fs_.Parse(args)
-	if fs_.NArg() < 2 {
+	pos, err := parseInterleaved(fs_, args)
+	if err != nil {
+		return err
+	}
+	if len(pos) < 2 {
 		return fmt.Errorf("usage: tennis rm <namespace> <id...>")
 	}
 	db, err := open(*dbPath, true)
@@ -294,11 +333,11 @@ func cmdRm(args []string) error {
 	}
 	defer db.Close()
 	ctx := context.Background()
-	ns, err := db.Namespace(ctx, fs_.Arg(0))
+	ns, err := db.Namespace(ctx, pos[0])
 	if err != nil {
 		return err
 	}
-	n, err := ns.Delete(ctx, fs_.Args()[1:])
+	n, err := ns.Delete(ctx, pos[1:])
 	if err != nil {
 		return err
 	}
@@ -315,11 +354,13 @@ func cmdNS(args []string) error {
 	asJSON := fs_.Bool("json", false, "machine-readable output")
 	model := fs_.String("model", "", "built-in model (default "+embed.DefaultModel+")")
 	openaiModel := fs_.String("openai", "", "use an OpenAI model (requires OPENAI_API_KEY)")
-	fs_.Parse(args)
-
+	pos, err := parseInterleaved(fs_, args)
+	if err != nil {
+		return err
+	}
 	sub := "list"
-	if fs_.NArg() > 0 {
-		sub = fs_.Arg(0)
+	if len(pos) > 0 {
+		sub = pos[0]
 	}
 	db, err := open(*dbPath, *asJSON)
 	if err != nil {
@@ -348,10 +389,10 @@ func cmdNS(args []string) error {
 		return nil
 
 	case "create":
-		if fs_.NArg() < 2 {
+		if len(pos) < 2 {
 			return fmt.Errorf("usage: tennis ns create <name> [--model M | --openai M]")
 		}
-		ns, err := db.CreateNamespace(ctx, fs_.Arg(1), tennis.NamespaceOptions{Model: *model, OpenAIModel: *openaiModel})
+		ns, err := db.CreateNamespace(ctx, pos[1], tennis.NamespaceOptions{Model: *model, OpenAIModel: *openaiModel})
 		if err != nil {
 			return err
 		}
@@ -359,13 +400,13 @@ func cmdNS(args []string) error {
 		return nil
 
 	case "drop":
-		if fs_.NArg() < 2 {
+		if len(pos) < 2 {
 			return fmt.Errorf("usage: tennis ns drop <name>")
 		}
-		if err := db.DropNamespace(ctx, fs_.Arg(1)); err != nil {
+		if err := db.DropNamespace(ctx, pos[1]); err != nil {
 			return err
 		}
-		fmt.Printf("dropped %q\n", fs_.Arg(1))
+		fmt.Printf("dropped %q\n", pos[1])
 		return nil
 	}
 	return fmt.Errorf("unknown subcommand %q (want list, create, drop)", sub)

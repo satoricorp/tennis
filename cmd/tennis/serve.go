@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"net"
@@ -55,14 +56,16 @@ func cmdServe(args []string) error {
 		}
 		name := r.PathValue("ns")
 		ns, err := db.Namespace(r.Context(), name)
-		if err != nil {
+		if errors.Is(err, tennis.ErrNamespaceNotFound) {
 			ns, err = db.CreateNamespace(r.Context(), name, tennis.NamespaceOptions{
 				Model: body.Model, OpenAIModel: body.OpenAI,
 			})
-			if err != nil {
-				respond(w, nil, err)
-				return
-			}
+		}
+		// Only "not found" triggers a create; any other open failure (missing
+		// key, model mismatch) must be reported as itself.
+		if err != nil {
+			respond(w, nil, err)
+			return
 		}
 		res, err := ns.Write(r.Context(), body.Documents)
 		respond(w, res, err)

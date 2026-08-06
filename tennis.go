@@ -14,6 +14,7 @@ package tennis
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -24,6 +25,14 @@ import (
 	"github.com/joelachance/tennis/embed"
 	_ "modernc.org/sqlite" // pure-Go driver: no cgo, so the binary stays static
 )
+
+// ErrNamespaceNotFound reports that a namespace does not exist. Callers that
+// auto-create on first use must check for this with errors.Is rather than
+// treating any Namespace() error as "missing" — a namespace can also fail to
+// open because its bound embedder cannot be reconstructed (an OpenAI namespace
+// without its key, say), and answering that with "already exists" from a
+// doomed create hides the actual problem.
+var ErrNamespaceNotFound = errors.New("namespace does not exist")
 
 // DB is a tennis database. It is safe for concurrent use.
 type DB struct {
@@ -55,15 +64,23 @@ func Open(path string) (*DB, error) {
 		}
 	}
 
-	sqlDB, err := sql.Open("sqlite", expanded)
+	// Pragmas ride in the DSN, NOT in Exec calls after opening. database/sql is
+	// a connection pool, and an Exec'd PRAGMA configures only whichever
+	// connection ran it — every other connection the pool opens would have
+	// busy_timeout=0 and fail instantly under write contention instead of
+	// waiting. The DSN form is applied by the driver to each new connection.
+	//
+	// WAL lets a query run while an index is being written, which matters
+	// because seeding a large corpus is slow and search should stay available
+	// during it.
+	dsn := "file:" + expanded +
+		"?_pragma=busy_timeout(5000)" +
+		"&_pragma=journal_mode(WAL)" +
+		"&_pragma=synchronous(NORMAL)" +
+		"&_pragma=foreign_keys(1)"
+	sqlDB, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, err
-	}
-	for _, stmt := range pragmaStatements {
-		if _, err := sqlDB.Exec(stmt); err != nil {
-			sqlDB.Close()
-			return nil, fmt.Errorf("applying %q: %w", stmt, err)
-		}
 	}
 	for _, stmt := range append(append([]string{}, schemaStatements...), triggerStatements...) {
 		if _, err := sqlDB.Exec(stmt); err != nil {
@@ -161,7 +178,7 @@ func (d *DB) Namespace(ctx context.Context, name string) (*Namespace, error) {
 		`SELECT embedder_id, dims, chunk_size, chunk_over FROM namespaces WHERE name = ?`, name).
 		Scan(&embedderID, &dims, &chunkSize, &chunkOverlap)
 	if err == sql.ErrNoRows {
-		return nil, fmt.Errorf("namespace %q does not exist", name)
+		return nil, fmt.Errorf("namespace %q: %w", name, ErrNamespaceNotFound)
 	}
 	if err != nil {
 		return nil, err

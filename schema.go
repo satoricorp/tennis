@@ -77,13 +77,5 @@ var triggerStatements = []string{
 	END`,
 }
 
-// pragmaStatements are applied per connection.
-//
-// WAL lets a query run while an index is being written, which matters because
-// seeding a large corpus is slow and search should stay available during it.
-var pragmaStatements = []string{
-	`PRAGMA journal_mode = WAL`,
-	`PRAGMA synchronous = NORMAL`,
-	`PRAGMA foreign_keys = ON`,
-	`PRAGMA busy_timeout = 5000`,
-}
+// Connection pragmas live in the DSN built by Open, not here: an Exec'd PRAGMA
+// only configures the single pool connection that ran it.

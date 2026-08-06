@@ -2,6 +2,9 @@ package tennis
 
 import (
 	"context"
+	"database/sql"
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -326,4 +329,93 @@ func ids(rs []Result) []string {
 		out[i] = r.ID
 	}
 	return out
+}
+
+// Regression: pragmas used to be Exec'd after open, which configures only the
+// one pool connection that ran them. Any other connection the pool opened had
+// busy_timeout=0 and failed instantly under write contention. The DSN form is
+// applied per connection by the driver; this test forces a second connection
+// and checks it.
+func TestPragmasApplyToEveryPoolConnection(t *testing.T) {
+	db := openTest(t)
+	ctx := context.Background()
+
+	c1, err := db.sql.Conn(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c1.Close()
+	c2, err := db.sql.Conn(ctx) // second live conn => pool must open a new one
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c2.Close()
+
+	for name, c := range map[string]*sql.Conn{"conn1": c1, "conn2": c2} {
+		var busy, fk int
+		if err := c.QueryRowContext(ctx, "PRAGMA busy_timeout").Scan(&busy); err != nil {
+			t.Fatal(err)
+		}
+		if err := c.QueryRowContext(ctx, "PRAGMA foreign_keys").Scan(&fk); err != nil {
+			t.Fatal(err)
+		}
+		if busy != 5000 || fk != 1 {
+			t.Errorf("%s: busy_timeout=%d foreign_keys=%d; pragmas did not reach this connection", name, busy, fk)
+		}
+	}
+}
+
+// Regression: auto-create-on-first-use must key on ErrNamespaceNotFound
+// specifically. Before the sentinel existed, ANY open failure fell through to
+// CreateNamespace, so "OPENAI_API_KEY is not set" surfaced as the baffling
+// "namespace already exists".
+func TestNamespaceNotFoundIsDistinguishable(t *testing.T) {
+	db := openTest(t)
+	ctx := context.Background()
+
+	_, err := db.Namespace(ctx, "missing")
+	if !errors.Is(err, ErrNamespaceNotFound) {
+		t.Errorf("missing namespace should be ErrNamespaceNotFound, got: %v", err)
+	}
+
+	// A namespace that exists but cannot open must NOT look like "not found".
+	if _, err := db.CreateNamespace(ctx, "agents", NamespaceOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	db.modelLoader = func(ctx context.Context, name string, _ func(string)) (embed.Embedder, error) {
+		return nil, fmt.Errorf("model backend unavailable")
+	}
+	_, err = db.Namespace(ctx, "agents")
+	if err == nil {
+		t.Fatal("expected an error from the failing loader")
+	}
+	if errors.Is(err, ErrNamespaceNotFound) {
+		t.Error("an open failure must not masquerade as not-found — that is the auto-create trap")
+	}
+}
+
+// Regression: the FTS query builder used to keep only ASCII [a-z0-9_], which
+// shredded accented words into garbage terms and reduced non-Latin queries to
+// nothing — silently turning off the keyword half of the hybrid for every
+// language but English. The index side (unicode61) always handled these fine.
+func TestKeywordSearchSpeaksUnicode(t *testing.T) {
+	db := openTest(t)
+	ctx := context.Background()
+	ns, err := db.CreateNamespace(ctx, "docs", NamespaceOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ns.Write(ctx, []Document{
+		{ID: "fr", Text: "un café et un résumé sur la terrasse"},
+		{ID: "en", Text: "a coffee and a summary on the porch"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	res, err := ns.Query(ctx, Query{Text: "café", TopK: 2, Mode: Keyword})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res) != 1 || res[0].ID != "fr" {
+		t.Errorf(`keyword query "café": want [fr], got %v`, ids(res))
+	}
 }
