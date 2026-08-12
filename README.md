@@ -80,7 +80,30 @@ tennis seed notes ./docs --json               # machine-readable
 
 Re-running `seed` is an incremental update. Files whose contents and metadata are byte-identical to what is stored are skipped entirely — not re-read into the model, not re-indexed. This is why re-seeding a large corpus after editing one file takes about as long as indexing one file.
 
-`seed` also refuses two kinds of junk, with a note on stderr: files containing binary content (a PDF's raw bytes would index without erroring and quietly pollute every future ranking), and files over 10MB (at that size it's a log or a dataset, not prose).
+`seed` also refuses two kinds of junk, with a note on stderr: files containing binary content (a PDF's raw bytes would index without erroring and quietly pollute every future ranking), and files over 10MB (at that size it's a log or a dataset, not prose). Binary detection is a NUL-byte check in the leading 8KB, the same heuristic git uses; a binary file shorter than that window with no NUL byte in it can slip through and get indexed.
+
+### `put` — ingest documents that aren't files
+
+`seed` walks a directory; `put` is for content that never touched disk — event lines, chat turns, agent claims, anything a program produces rather than a file. It reads newline-delimited JSON from stdin, one document per line:
+
+```bash
+echo '{"id": "e1", "text": "deploy failed with a connection timeout", "attributes": {"kind": "event", "session": "s1"}}' \
+  | tennis put agents
+
+tennis put agents < events.ndjson                     # a whole batch at once
+tennis put agents --openai text-embedding-3-small < events.ndjson
+tennis put agents --json < events.ndjson               # machine-readable
+```
+
+Each line is `{"id": "...", "text": "...", "attributes": {...}}` — `attributes` is optional, everything else follows `seed`: the namespace is created on first use bound to the builtin model (or `--openai <model>`), and a document whose text and attributes are byte-identical to what's stored is skipped rather than re-embedded.
+
+A line that isn't valid JSON, or is missing `id` or `text`, is reported to stderr with its line number and does not stop the batch; `put` exits nonzero if any line failed.
+
+```
+$ tennis put agents --json < events.ndjson
+tennis: put: line 14: missing "id"
+{"written": 40, "skipped": 3, "chunks": 51, "failed": 1}
+```
 
 ### `match` — search
 
@@ -91,8 +114,25 @@ tennis match notes "retry" --mode keyword             # BM25 only
 tennis match notes "retry" --mode semantic            # vectors only
 tennis match notes "auth" --where 'status=merged'     # filter by attribute
 tennis match notes "auth" --where 'cost>5,status!=failed'
-tennis match notes "auth" --json                      # full results with scores
+tennis match notes "auth" --json                      # full results with scores and attributes
 ```
+
+`--json` output includes each hit's stored `attributes`, not just its text and score:
+
+```json
+[
+  {
+    "id": "e1",
+    "score": 0.0328,
+    "text": "deploy failed with a connection timeout",
+    "attributes": {"kind": "event", "session": "s1"},
+    "keyword_rank": 1,
+    "semantic_rank": 1
+  }
+]
+```
+
+`tennis get notes <id> --json` includes the same `attributes` field.
 
 ### `ns` — namespaces
 
@@ -267,7 +307,7 @@ curl -s localhost:8817/v1/namespaces/notes/write -d '{
 curl -s localhost:8817/v1/namespaces/notes/query -d '{
   "text": "keep me signed in", "top_k": 5, "where": "status=merged"
 }'
-# {"results":[{"id":"a1","score":0.0164,"text":"...","keyword_rank":0,"semantic_rank":1}]}
+# {"results":[{"id":"a1","score":0.0164,"text":"...","attributes":{"status":"merged"},"keyword_rank":0,"semantic_rank":1}]}
 
 # list namespaces
 curl -s localhost:8817/v1/namespaces

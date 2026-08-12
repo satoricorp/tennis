@@ -30,6 +30,7 @@ USAGE
 
 COMMANDS
   seed <namespace> <path...>   index files or directories
+  put <namespace>              ingest NDJSON documents from stdin
   match <namespace> <query>    search
   get <namespace> <id>         print one document
   rm <namespace> <id...>       delete documents
@@ -56,6 +57,8 @@ func main() {
 	switch cmd {
 	case "seed":
 		err = cmdSeed(args)
+	case "put":
+		err = cmdPut(args)
 	case "match":
 		err = cmdMatch(args)
 	case "get":
