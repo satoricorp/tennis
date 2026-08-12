@@ -16,7 +16,6 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 	"time"
 
@@ -224,7 +223,10 @@ func cmdSeed(args []string) error {
 				skip(p, "binary content")
 				return nil
 			}
-			abs, _ := filepath.Abs(p)
+			abs, err := filepath.Abs(p)
+			if err != nil {
+				return fmt.Errorf("resolving absolute path for %s: %w", p, err)
+			}
 			attrs := map[string]any{
 				"path": abs, "name": d.Name(),
 				"modified": info.ModTime().UTC().Format(time.RFC3339),
@@ -265,6 +267,13 @@ const maxSeedFileSize = 10 << 20
 // the same heuristic git uses: a NUL byte in the leading window. Indexing a
 // PDF's raw bytes never errors — it just quietly pollutes every future ranking
 // with garbage chunks, which is worse.
+//
+// Known gap: a binary file shorter than the window with no NUL byte in it
+// (some single-frame image headers, for instance) passes this check and gets
+// indexed. git accepts the same gap for the same reason — a byte-proportion
+// heuristic catches more but also misclassifies legitimate text that happens
+// to be terse and symbol-heavy, and that false positive is worse here than a
+// rare missed binary, since it would silently drop real content from seed.
 func isBinary(content []byte) bool {
 	window := content
 	if len(window) > 8192 {
@@ -546,5 +555,3 @@ func emit(v any) error {
 	enc.SetIndent("", "  ")
 	return enc.Encode(v)
 }
-
-var _ = sort.Strings

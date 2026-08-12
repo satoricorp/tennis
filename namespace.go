@@ -181,7 +181,11 @@ func (n *Namespace) Delete(ctx context.Context, ids []string) (int, error) {
 		if err != nil {
 			return 0, err
 		}
-		if k, _ := r.RowsAffected(); k > 0 {
+		k, err := r.RowsAffected()
+		if err != nil {
+			return 0, err
+		}
+		if k > 0 {
 			deleted++
 		}
 	}

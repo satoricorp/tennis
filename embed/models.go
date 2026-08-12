@@ -120,7 +120,16 @@ func exists(p string) bool {
 // still succeeds and the changed bytes would otherwise be embedded into every
 // vector this install ever produces. A mismatch aborts before the rename, so
 // nothing unverified ever lands in the cache.
+//
+// An empty wantSHA is refused rather than treated as "skip verification". A
+// spec built without a pinned checksum is a bug, not permission to download
+// unverified — the failure mode of silently accepting it is a supply-chain
+// hole: a future model spec added without its SHA fields populated would
+// download and cache whatever the server returned, no questions asked.
 func download(ctx context.Context, url, dst, wantSHA string) error {
+	if wantSHA == "" {
+		return fmt.Errorf("refusing to download %s: no pinned checksum for this file", url)
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return err
@@ -149,7 +158,7 @@ func download(ctx context.Context, url, dst, wantSHA string) error {
 	if err := tmp.Close(); err != nil {
 		return err
 	}
-	if got := hex.EncodeToString(hasher.Sum(nil)); wantSHA != "" && got != wantSHA {
+	if got := hex.EncodeToString(hasher.Sum(nil)); got != wantSHA {
 		return fmt.Errorf("checksum mismatch for %s:\n  got  %s\n  want %s\nthe upstream file changed or the download was corrupted; refusing to use it", url, got, wantSHA)
 	}
 	return os.Rename(tmpName, dst)

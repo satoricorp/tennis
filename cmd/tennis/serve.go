@@ -67,6 +67,12 @@ func cmdServe(args []string) error {
 		return err
 	case <-ctx.Done():
 		fmt.Fprintln(os.Stderr, "tennis: shutting down")
+		// Deliberately context.Background(), not ctx: by this point ctx.Done()
+		// has already fired, so deriving the timeout from ctx would hand
+		// WithTimeout an already-canceled parent and the deadline would be
+		// instantly exceeded — Shutdown would kill every in-flight request
+		// immediately instead of giving them 5 seconds. A fresh context is
+		// what makes the grace period real.
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		return srv.Shutdown(shutdownCtx)

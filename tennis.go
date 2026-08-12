@@ -253,7 +253,11 @@ func (d *DB) DropNamespace(ctx context.Context, name string) error {
 	if err != nil {
 		return err
 	}
-	if n, _ := res.RowsAffected(); n == 0 {
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
 		return fmt.Errorf("namespace %q: %w", name, ErrNamespaceNotFound)
 	}
 	return tx.Commit()
