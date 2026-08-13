@@ -4,9 +4,11 @@
 
 Search your notes, docs, or agent history by keyword *and* by meaning at the same time — so "keep me signed in" finds the page about session cookies, even though they share no words.
 
+For the database-inclined: this is the sqlite-vec idea — vectors living in a SQLite file you own — plus the parts you can't easily get from sqlite-vec alone: BM25 keyword search fused with semantic search into one ranking, and the embedding model itself shipped inside the binary, so semantic search works with no pipeline and no API key. Details in [Compared to sqlite-vec](#compared-to-sqlite-vec).
+
 - **Nothing to install.** One static binary. No Python, no Node, no Docker, no Homebrew step, no database extension to compile. Download and run.
 - **Works offline, costs nothing.** The embedding model ships with it and runs on your machine. No API key, no network, no per-query bill.
-- **Finds things two ways at once.** Exact keyword matching catches names, IDs, and rare terms. Meaning-based matching catches paraphrases. You get one ranked list combining both.
+- **Finds things two ways at once.** BM25 keyword search (SQLite FTS5) catches names, IDs, and rare terms. Semantic search (embedding vectors, cosine) catches paraphrases. You get one list fusing both by reciprocal rank.
 - **Your data stays a file.** Everything lives in one SQLite database you can copy, back up, inspect with `sqlite3`, or delete.
 - **Same on Mac and Linux.** Identical binary behavior, no platform-specific setup.
 - **Use it however you want.** Command line, Go library, or a local HTTP API for every other language.
@@ -20,6 +22,14 @@ tennis match notes "keep me signed in"
 ---
 
 ## Install
+
+Grab a binary from [Releases](https://github.com/satoricorp/tennis/releases) — it really is one file:
+
+```bash
+curl -sL https://github.com/satoricorp/tennis/releases/download/v0.1.0/tennis_0.1.0_$(uname -s | tr '[:upper:]' '[:lower:]')_$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/').tar.gz | tar xz tennis
+```
+
+Or with Go:
 
 ```bash
 go install github.com/satoricorp/tennis/cmd/tennis@latest
@@ -432,6 +442,22 @@ your text
 **Why the FTS triggers matter.** SQLite's external-content FTS5 tables do not follow their source table automatically. Without triggers the index silently drifts on every update and delete — deleted documents keep matching, stale text keeps being returned, and nothing errors. tennis creates those triggers in the first migration, and there is a regression test that updates and deletes a document and asserts the old terms stop matching.
 
 ---
+
+## Compared to sqlite-vec
+
+[sqlite-vec](https://github.com/asg017/sqlite-vec) answers "where do my vectors live" — and deliberately leaves everything else to you. tennis makes the same core commitment (your index is one SQLite file you can open with `sqlite3`, copy, back up, or delete) and builds in the layers you would otherwise assemble around it:
+
+| | sqlite-vec | tennis |
+|---|---|---|
+| Vector storage, exact KNN | yes | yes |
+| Embeddings | bring your own | model ships in the binary, runs offline |
+| Keyword search | separate FTS5 setup | BM25 built in |
+| Hybrid ranking | hand-written fusion SQL | reciprocal rank fusion by default |
+| Loading it | compiled C extension (in Go: cgo) | pure Go, `CGO_ENABLED=0`, one static binary |
+| Chunking, incremental indexing | yours to write | built in |
+| Embedder/index mismatch | silently wrong results | refused at open, by design |
+
+If you want raw SQL over vectors inside a database you already have, use sqlite-vec — it is very good at exactly that. tennis is for when you want the whole retrieval loop — embed, chunk, index, fuse, filter — working in one command.
 
 ## What it isn't
 
