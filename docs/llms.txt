@@ -1,0 +1,20 @@
+# Tennis
+
+> Local hybrid search. Keyword and semantic in one ranking, one binary, one SQLite file, no server.
+
+## Docs
+
+- [Tennis](https://satoricorp.github.io/tennis/docs/): Local hybrid search. Keyword and semantic in one ranking, one binary, one SQLite file, no server.
+- [Getting Started](https://satoricorp.github.io/tennis/docs/getting-started): Install Tennis, index a directory, and run the search that shows why hybrid ranking matters.
+- [CLI](https://satoricorp.github.io/tennis/docs/cli): add, search, put, get, rm, ns, and serve — every flag, with real output.
+- [Importing sessions](https://satoricorp.github.io/tennis/docs/importing): Index ChatGPT and Claude exports, and Claude Code and Codex transcripts, then search them by attribute.
+- [Go SDK](https://satoricorp.github.io/tennis/docs/go-sdk): Open a database, create a namespace, write documents, and query with filters from Go.
+- [HTTP API](https://satoricorp.github.io/tennis/docs/http-api): tennis serve exposes write, query, delete, and list over loopback — for every language that isn't Go.
+- [Embedders](https://satoricorp.github.io/tennis/docs/embedders): The built-in static model, switching to OpenAI, and why a namespace is bound to one embedder for life.
+- [How it works](https://satoricorp.github.io/tennis/docs/how-it-works): Chunking, BM25, cosine, and reciprocal rank fusion — and the reasoning behind each choice.
+- [Troubleshooting](https://satoricorp.github.io/tennis/docs/troubleshooting): The errors Tennis raises, what each one is protecting you from, and how to clear it.
+
+## Machine-readable
+
+- [llms-full.txt](https://satoricorp.github.io/tennis/docs/llms-full.txt): Full docs in one file
+- Append `.md` to any docs URL for Markdown (e.g. https://satoricorp.github.io/tennis/docs/cli.md)

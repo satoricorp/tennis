@@ -1,0 +1,14 @@
+{
+  "title": "Tennis",
+  "pages": [
+    "index",
+    "getting-started",
+    "cli",
+    "importing",
+    "go-sdk",
+    "http-api",
+    "embedders",
+    "how-it-works",
+    "troubleshooting"
+  ]
+}

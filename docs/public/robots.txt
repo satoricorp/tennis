@@ -1,0 +1,9 @@
+User-agent: *
+Allow: /
+
+# Machine-readable docs for agents / LLMs
+# https://satoricorp.github.io/tennis/docs/llms.txt
+# https://satoricorp.github.io/tennis/docs/llms-full.txt
+# Append .md to any docs URL for Markdown
+
+Sitemap: https://satoricorp.github.io/tennis/docs/llms.txt

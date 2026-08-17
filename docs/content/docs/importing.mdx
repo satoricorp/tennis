@@ -1,0 +1,90 @@
+---
+title: "Importing sessions"
+description: "Index ChatGPT and Claude exports, and Claude Code and Codex transcripts, then search them by attribute."
+---
+
+The fastest way to have something worth searching is to index the history you already have. Tennis reads four session formats plus plain files, and `add` works out which is which.
+
+```bash
+tennis add ~/Downloads/chatgpt-export.zip
+tennis search "that thing about session cookies"
+```
+
+## Why import rather than capture
+
+Capturing conversations live — pointing a client at a proxy or a custom base URL — only ever sees traffic from the moment it is configured. Everything before that is in the export archive and nowhere else, so the archive is the thing Tennis reads.
+
+Claude Code and Codex are kinder: they keep their transcripts on your disk already, under `~/.claude` and `~/.codex`, and Tennis reads them where they sit.
+
+## How detection works
+
+Detection reads the source rather than the filename:
+
+- **ChatGPT vs Claude exports** are told apart by the shape of their `conversations.json`.
+- **Claude Code vs Codex transcripts** are told apart by the fields on each line of their `.jsonl` — Claude Code writes a `uuid` and `sessionId`, Codex wraps everything in a `{timestamp, type, payload}` envelope.
+
+A `.zip`, an already-unzipped directory, and a single transcript are all acceptable. When the guess is wrong, name the source:
+
+```bash
+tennis add --chatgpt ~/Downloads/export.zip
+tennis add --claude ~/Downloads/export.zip
+tennis add --claude-code ~/.claude
+tennis add --codex ~/.codex
+```
+
+## What a run looks like
+
+```bash
+$ tennis add ~/Downloads/claude-export.zip
+tennis: created namespace "context" bound to builtin:potion-retrieval-32M
+tennis: ~/Downloads/claude-export.zip: reading a Claude export (conversations.json, projects.json)
+tennis: 5000 documents in…
+imported 11423, skipped 0 unchanged, 14106 chunks in "context"
+
+$ tennis search "that thing about session cookies"
+> a session cookie with a refresh token is the usual shape…
+  Claude [2025-03-15] 0.0328
+```
+
+## Turns or conversations
+
+By default each message becomes its own document, which is the unit you tend to remember. `--per conversation` makes each thread one document instead, for when the thread matters more than the line:
+
+```bash
+tennis add ~/Downloads/export.zip --per conversation
+```
+
+Whole threads are long, and a vector is the average of its tokens — see [why chunking matters](/how-it-works#why-chunk-at-all). `--per turn` usually retrieves better; `--per conversation` is for when you want to find the discussion, not the sentence.
+
+## Searching by attribute
+
+Every imported document carries the attributes needed to find its way home — `source`, `session`, `role`, `title`, `created`, and for local sessions `project`, `cwd`, and `branch`:
+
+```bash
+tennis search "retry logic" --where role=user
+tennis search "flaky test" --where project=tennis,branch=main
+tennis search "the timeout" --where source=codex
+```
+
+Filters run before ranking, so a filtered query is faster than an unfiltered one.
+
+## Re-importing is free
+
+Session documents are keyed by the export's own conversation and message IDs. A fresh export months later writes only what is new:
+
+```bash
+$ tennis add ~/Downloads/claude-export-2.zip
+imported 412, skipped 11423 unchanged, 502 chunks in "context"
+```
+
+## What is deliberately left out
+
+Three omissions, each for the same reason — they would make every future ranking worse:
+
+- **Tool calls and tool results** in local transcripts. Those are mostly whole file reads and command output; letting them in would mean every search ranked file contents above what was said about them. Tennis indexes text and thinking.
+- **The raw model traffic in a Codex rollout.** Codex records each exchange twice, once as raw traffic carrying the harness preamble and once as the events the interface showed. Tennis reads the second, because what you remember saying is what you typed.
+- **ChatGPT messages the exporter marked as hidden.** They were never on screen.
+
+<Callout type="warn" title="Namespaces are bound to one embedder">
+An import creates the namespace on first use and binds it to an embedder forever. If you plan to use OpenAI embeddings for this corpus, pass `--openai` on the *first* import — switching later means a new namespace and a full re-index. See [Embedders](/embedders).
+</Callout>

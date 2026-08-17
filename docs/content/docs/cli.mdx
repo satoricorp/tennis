@@ -1,0 +1,206 @@
+---
+title: "CLI"
+description: "add, search, put, get, rm, ns, and serve — every flag, with real output."
+---
+
+Two commands cover almost everything: `add` puts things in, `search` gets them out. Neither needs a namespace, because both default to `context`.
+
+```bash
+tennis add ~/Documents/notes
+tennis search "keep me signed in"
+```
+
+## tennis add
+
+`add` is the one way in. Point it at an export archive, a directory of agent transcripts, or a pile of files, and it works out what it was handed:
+
+```bash
+tennis add ~/Downloads/chatgpt-export.zip     # a ChatGPT data export
+tennis add ~/Downloads/claude-export.zip      # a Claude data export
+tennis add ~/.claude                          # local Claude Code sessions
+tennis add ~/.codex                           # local Codex sessions
+tennis add ./docs                             # a directory tree of files
+tennis add ./a.md ./b.md                      # specific files
+```
+
+Detection reads the source, not the filename. When the guess is wrong, or you would rather be explicit, name the source:
+
+```bash
+tennis add --chatgpt ~/Downloads/export.zip
+tennis add --claude ~/Downloads/export.zip
+tennis add --claude-code ~/.claude
+tennis add --codex ~/.codex
+tennis add --files ~/Documents/notes
+```
+
+A `.zip`, an already-unzipped directory, and a single transcript are all acceptable. [Importing sessions](/importing) covers what Tennis reads out of each format and what it deliberately skips.
+
+```bash
+tennis add ./src --files --ext .go,.ts,.rs    # pick extensions (default .md,.txt)
+tennis add ./docs --chunk 2000                # bigger chunks for a new namespace
+tennis add ~/.codex --ns work                 # a namespace other than the default
+tennis add ./docs --json                      # machine-readable
+```
+
+| Flag | Meaning |
+|---|---|
+| `--ns <name>` | namespace (default `context`, or `$TENNIS_NS`) |
+| `--format <fmt>` | `auto` (default), `chatgpt`, `claude`, `claude-code`, `codex`, `files` |
+| `--chatgpt` / `--claude` / `--claude-code` / `--codex` / `--files` | shorthand for `--format` |
+| `--per <unit>` | one document per `turn` (default) or `conversation` |
+| `--ext <list>` | extensions to index when the source is plain files (default `.md,.txt`) |
+| `--chunk <n>` | chunk size in characters, for a new namespace |
+| `--model <name>` | built-in model for a new namespace (default `potion-retrieval-32M`) |
+| `--openai <model>` | use an OpenAI model instead (requires `OPENAI_API_KEY`) |
+| `--db <path>` | database file (default `~/.tennis/db.sqlite`, or `$TENNIS_DB`) |
+| `--json` | machine-readable output on stdout; progress goes to stderr |
+
+Re-running `add` is an incremental update. Files are keyed by path and skipped when contents and metadata are byte-identical to what is stored; session documents are keyed by the export's own conversation and message IDs, so a fresh export months later writes only what is new.
+
+`add` refuses two kinds of junk when reading plain files, with a note on stderr: files containing binary content, and files over 10MB. Binary detection is a NUL-byte check in the leading 8KB, the same heuristic git uses.
+
+## tennis search
+
+```bash
+tennis search "exponential backoff"
+tennis search "keep me signed in" -n 5             # top 5
+tennis search "retry" --mode keyword               # BM25 only
+tennis search "retry" --mode semantic              # vectors only
+tennis search "auth" --where 'status=merged'       # filter by attribute
+tennis search "auth" --where 'cost>5,status!=failed'
+tennis search "auth" --ns work
+tennis search "auth" --json
+```
+
+| Flag | Meaning |
+|---|---|
+| `-n <k>` | how many results (default 10) |
+| `--mode <mode>` | `hybrid` (default), `keyword`, `semantic` |
+| `--where <filter>` | attribute filter: `key=value`, `key>value`, `key!=value`, comma-separated |
+| `--ns <name>` | namespace (default `context`, or `$TENNIS_NS`) |
+| `--db <path>` | database file |
+| `--json` | full results with scores and attributes |
+
+When nothing matches, `search` says so rather than padding the list:
+
+```bash
+$ tennis search "keep me signed in" --mode keyword
+no matches
+```
+
+That is `--mode keyword` doing its job: no document contains those words. The default hybrid mode would still return the semantic hits.
+
+`--json` includes each hit's stored attributes, not just its text and score:
+
+```json
+[
+  {
+    "id": "/Users/you/Documents/notes/auth.md",
+    "score": 0.01639344262295082,
+    "text": "# Session handling\n\nMake the login flow remember the user between sessions…",
+    "attributes": {
+      "kind": "file",
+      "modified": "2026-08-17T19:15:37Z",
+      "name": "auth.md",
+      "path": "/Users/you/Documents/notes/auth.md",
+      "size": 227
+    },
+    "keyword_rank": 0,
+    "semantic_rank": 1
+  }
+]
+```
+
+`keyword_rank: 0` means BM25 did not return this document at all — the ranks are 1-based, and `0` is "absent", not "first".
+
+## tennis put
+
+`add` walks a directory; `put` is for content that never touched disk — event lines, chat turns, agent claims, anything a program produces rather than a file. It reads newline-delimited JSON from stdin, one document per line:
+
+```bash
+echo '{"id": "e1", "text": "deploy failed with a connection timeout", "attributes": {"kind": "event"}}' \
+  | tennis put agents
+
+tennis put agents < events.ndjson
+tennis put agents --openai text-embedding-3-small < events.ndjson
+tennis put agents --json < events.ndjson
+```
+
+Each line is `{"id": "...", "text": "...", "attributes": {...}}`. `attributes` is optional; everything else follows `add`, including creating the namespace on first use and skipping documents that are byte-identical to what is stored.
+
+A line that isn't valid JSON, or is missing `id` or `text`, is reported to stderr with its line number and does not stop the batch. `put` exits nonzero if any line failed:
+
+```bash
+$ tennis put agents --json < events.ndjson
+tennis: put: line 3: unexpected end of JSON input
+{
+  "chunks": 2,
+  "failed": 1,
+  "skipped": 0,
+  "written": 2
+}
+error: 1 line(s) failed to parse
+```
+
+## tennis ns
+
+```bash
+tennis ns list
+tennis ns create agents                               # built-in model
+tennis ns create agents --openai text-embedding-3-small
+tennis ns drop agents
+```
+
+```bash
+$ tennis ns list
+NAMESPACE            EMBEDDER                             DIMS     DOCS   CHUNKS
+agents               builtin:potion-retrieval-32M          512        2        2
+context              builtin:potion-retrieval-32M          512        3        3
+```
+
+The embedder column is not decoration — it is the binding a namespace is stuck with for life. See [Embedders](/embedders#how-the-binding-is-enforced).
+
+## tennis get, rm, serve
+
+```bash
+tennis get notes /abs/path/to/auth.md          # print a stored document
+tennis get agents e1 --json                    # with its attributes
+tennis rm notes /abs/path/to/auth.md           # delete documents
+tennis serve                                   # local HTTP API on 127.0.0.1:8817
+tennis serve --addr 127.0.0.1:9000
+tennis version
+```
+
+```bash
+$ tennis get agents e1 --json
+{
+  "id": "e1",
+  "text": "deploy failed with a connection timeout",
+  "attributes": {
+    "kind": "event",
+    "session": "s1"
+  }
+}
+```
+
+`serve` is documented in full under [HTTP API](/http-api).
+
+## Common flags
+
+| Flag | Meaning |
+|---|---|
+| `--db <path>` | database file (default `~/.tennis/db.sqlite`, or `$TENNIS_DB`) |
+| `--ns <name>` | namespace for `add` and `search` (default `context`, or `$TENNIS_NS`) |
+| `--json` | machine-readable output on stdout; progress goes to stderr |
+
+## Naming the namespace positionally
+
+`add` and `search` take the namespace as a flag so that the common case needs no namespace at all. Three older commands take it as the first argument instead, and still work:
+
+```bash
+tennis seed notes ./docs                       # like tennis add --files ./docs --ns notes
+tennis import history ~/Downloads/export.zip   # like tennis add ~/Downloads/export.zip --ns history
+tennis match notes "keep me signed in"         # like tennis search "keep me signed in" --ns notes
+```
+
+`put`, `get`, and `rm` name the namespace positionally too.

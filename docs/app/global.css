@@ -1,0 +1,12 @@
+@import "fumadocs-ui/style.css";
+
+/* The wordmark is the one piece of www's brand that follows the reader into
+   the docs. Everything else here is Fumadocs' own type. */
+.tennis-nav-brand {
+  font-family: var(--font-wordmark), Garamond, serif;
+  font-weight: 300;
+  font-style: italic;
+  font-size: 30px; /* 2× fumadocs default text-[15px] */
+  letter-spacing: 0;
+  line-height: 1;
+}

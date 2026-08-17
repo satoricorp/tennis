@@ -1,0 +1,36 @@
+---
+title: "Tennis"
+description: "Local hybrid search. Keyword and semantic in one ranking, one binary, one SQLite file, no server."
+---
+
+Tennis searches your notes, docs, and agent history by keyword *and* by meaning at the same time — so `"keep me signed in"` finds the page about session cookies, even though they share no words.
+
+```bash
+tennis add ~/Documents/notes
+tennis search "keep me signed in"
+```
+
+One static binary. The embedding model ships inside it, so semantic search works offline, with no API key and no per-query bill. Everything lands in one SQLite file you can copy, inspect with `sqlite3`, or delete.
+
+## What you get
+
+- **Nothing to install.** No Python, no Node, no Docker, no database extension to compile.
+- **Two rankers, one list.** BM25 (SQLite FTS5) catches names, IDs, and rare terms. Embedding vectors catch paraphrases. Reciprocal rank fusion merges them.
+- **Your data stays a file.** `~/.tennis/db.sqlite`, and nothing else.
+- **Your history, indexed.** Point it at a ChatGPT or Claude export, or at `~/.claude` or `~/.codex`, and search months of conversation.
+- **It won't lie to you.** If something changes that would make results silently wrong, it stops and says so.
+
+<Callout type="info" title="Where this sits">
+Tennis is the [sqlite-vec](https://github.com/asg017/sqlite-vec) idea — vectors in a SQLite file you own — plus the parts you would otherwise assemble yourself: BM25 fused with semantic search into one ranking, and the embedder shipped in the binary. See [How it works](/how-it-works#compared-to-sqlite-vec) for the comparison.
+</Callout>
+
+<Cards>
+  <Card title="Getting Started" href="/getting-started" description="Install, index a directory, run the first search." />
+  <Card title="CLI" href="/cli" description="Every command and flag, with real output." />
+  <Card title="Importing sessions" href="/importing" description="ChatGPT, Claude, Claude Code, and Codex history." />
+  <Card title="Go SDK" href="/go-sdk" description="Open, write, query, and filter from Go." />
+  <Card title="HTTP API" href="/http-api" description="A local server for every other language." />
+  <Card title="Embedders" href="/embedders" description="The built-in model, OpenAI, and why the binding is enforced." />
+  <Card title="How it works" href="/how-it-works" description="Chunking, fusion, and the design decisions behind them." />
+  <Card title="Troubleshooting" href="/troubleshooting" description="What the errors mean and what to do." />
+</Cards>

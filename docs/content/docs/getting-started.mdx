@@ -1,0 +1,92 @@
+---
+title: "Getting Started"
+description: "Install Tennis, index a directory, and run the search that shows why hybrid ranking matters."
+---
+
+Install one binary, point it at a folder, ask it a question. No API key, no server, no configuration file.
+
+## Install
+
+A release binary really is one file:
+
+```bash
+curl -sL https://github.com/satoricorp/tennis/releases/download/v0.1.0/tennis_0.1.0_$(uname -s | tr '[:upper:]' '[:lower:]')_$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/').tar.gz | tar xz tennis
+```
+
+Or with Go:
+
+```bash
+go install github.com/satoricorp/tennis/cmd/tennis@latest
+```
+
+Or from source:
+
+```bash
+git clone https://github.com/satoricorp/tennis && cd tennis && CGO_ENABLED=0 go build -o tennis ./cmd/tennis
+```
+
+`CGO_ENABLED=0` is not a suggestion — it is the whole point. Tennis uses a pure-Go SQLite driver and a static embedding model, so the result is one self-contained binary with no shared libraries to find at runtime.
+
+<Callout type="info" title="One download, once">
+On first use Tennis fetches the embedding model (~123MB) to `~/.cache/tennis`. After that it never touches the network. See [Embedders](/embedders).
+</Callout>
+
+## Index something
+
+```bash
+$ tennis add ~/Documents/notes
+tennis: created namespace "context" bound to builtin:potion-retrieval-32M
+tennis: /Users/you/Documents/notes: reading plain files
+imported 3, skipped 0 unchanged, 3 chunks in "context"
+```
+
+You never named a namespace, so `add` used `context`, the default, and created it on first use. By default it reads `.md` and `.txt`; pass `--ext` for anything else.
+
+## Search it
+
+```bash
+$ tennis search "keep me signed in"
+> # Session handling Make the login flow remember the user between sessions. The session cookie is se…
+  auth.md [2026-08-17] 0.0164
+
+ 2. retry.md [2026-08-17] 0.0161  [sem#2]
+    # Retries Failed requests back off exponentially, doubling the delay each attempt up to a cap of th…
+ 3. config.md [2026-08-17] 0.0159  [sem#3]
+    # Configuration Write a parser for TOML configuration files. Values from the file are merged over t…
+```
+
+The query and the winning document share no words. `auth.md` came back because the vectors agree about what the sentence *means*.
+
+The best hit is printed as the answer — the words first, then where they came from and when. Below it the runners-up keep the ranked-list shape, because comparing them is the point.
+
+## Read the tags
+
+The `[sem#2]` tag says which ranker found a hit, and where in that ranker's list. It is the difference between a result both rankers agreed on and one only the vectors liked:
+
+```bash
+$ tennis search "TOML"
+> # Configuration Write a parser for TOML configuration files. Values from the file are merged over t…
+  config.md [2026-08-17] 0.0328
+
+ 2. retry.md [2026-08-17] 0.0161  [sem#2]
+    # Retries Failed requests back off exponentially, doubling the delay each attempt up to a cap of th…
+```
+
+`config.md` scores 0.0328 — twice the 0.0164 above — because BM25 and the vectors both ranked it first. A hit tagged with only one ranker and a low score is usually noise. Tennis has no relevance threshold and will not invent one; it shows you the evidence instead. See [How it works](/how-it-works#why-fuse-by-rank).
+
+## Re-indexing is nearly free
+
+```bash
+$ tennis add ~/Documents/notes
+tennis: /Users/you/Documents/notes: reading plain files
+imported 0, skipped 3 unchanged, 0 chunks in "context"
+```
+
+Unchanged files are never re-read into the model. Re-adding a large corpus after editing one file costs about as much as indexing one file.
+
+## Next steps
+
+- [CLI](/cli) — every command and flag
+- [Importing sessions](/importing) — index the agent and chat history you already have
+- [Go SDK](/go-sdk) and [HTTP API](/http-api) — using Tennis from code
+- [/llms.txt](/llms.txt) — machine-readable docs

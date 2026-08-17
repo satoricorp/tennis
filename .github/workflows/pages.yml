@@ -2,10 +2,11 @@ name: pages
 on:
   push:
     branches: [main]
-    # The Go code and the marketing site share a repo but not a release
-    # cadence; only site changes should redeploy the site.
+    # The Go code and the site share a repo but not a release cadence; only
+    # site changes should redeploy the site.
     paths:
       - 'www/**'
+      - 'docs/**'
       - '.github/workflows/pages.yml'
   workflow_dispatch:
 
@@ -23,18 +24,31 @@ concurrency:
 jobs:
   build:
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: www
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
           cache: npm
-          cache-dependency-path: www/package-lock.json
+          cache-dependency-path: |
+            www/package-lock.json
+            docs/package-lock.json
+
+      # Two Next apps, one Pages site. www is basePath /tennis and docs is
+      # basePath /tennis/docs, so each owns its own _next and the merge below
+      # is a plain copy with nothing to collide.
       - run: npm ci
+        working-directory: www
       - run: npm run build
+        working-directory: www
+
+      - run: npm ci
+        working-directory: docs
+      - run: npm run build
+        working-directory: docs
+
+      - run: mv docs/out www/out/docs
+
       - uses: actions/configure-pages@v5
       # path is workspace-relative, so it keeps the www/ prefix that
       # working-directory strips from the run steps above.

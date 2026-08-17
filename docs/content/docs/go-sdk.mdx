@@ -1,0 +1,181 @@
+---
+title: "Go SDK"
+description: "Open a database, create a namespace, write documents, and query with filters from Go."
+---
+
+The CLI is a thin wrapper over this package. Everything it does, you can do directly.
+
+```bash
+go get github.com/satoricorp/tennis
+```
+
+## A complete program
+
+```go
+package main
+
+import (
+    "context"
+    "fmt"
+    "log"
+
+    "github.com/satoricorp/tennis"
+)
+
+func main() {
+    ctx := context.Background()
+
+    db, err := tennis.Open("~/.tennis/db.sqlite")
+    if err != nil {
+        log.Fatal(err)
+    }
+    defer db.Close()
+
+    // The embedder is chosen here, once, and bound to the namespace forever.
+    ns, err := db.CreateNamespace(ctx, "agents", tennis.NamespaceOptions{})
+    if err != nil {
+        log.Fatal(err)
+    }
+
+    _, err = ns.Write(ctx, []tennis.Document{
+        {
+            ID:         "a1",
+            Text:       "make the login flow remember the user between sessions",
+            Attributes: map[string]any{"status": "merged", "cost": 4},
+        },
+        {
+            ID:         "a2",
+            Text:       "write a parser for TOML configuration files",
+            Attributes: map[string]any{"status": "open", "cost": 8},
+        },
+    })
+    if err != nil {
+        log.Fatal(err)
+    }
+
+    results, err := ns.Query(ctx, tennis.Query{
+        Text:   "keep me signed in",
+        TopK:   5,
+        Filter: tennis.Eq("status", "merged"),
+    })
+    if err != nil {
+        log.Fatal(err)
+    }
+
+    for _, r := range results {
+        fmt.Printf("%.4f  %s  (kw#%d sem#%d)\n  %s\n",
+            r.Score, r.ID, r.KeywordRank, r.SemanticRank, r.Text)
+    }
+}
+```
+
+## Opening an existing namespace
+
+```go
+ns, err := db.Namespace(ctx, "agents")   // rebuilds the bound embedder
+if err != nil {
+    log.Fatal(err)   // including: bound to a model you can no longer load
+}
+fmt.Println(ns.EmbedderID())   // builtin:potion-retrieval-32M
+```
+
+`db.Namespace` returns `tennis.ErrNamespaceNotFound` when there is nothing to open, so the "create if missing" shape is an `errors.Is` away:
+
+```go
+ns, err := db.Namespace(ctx, "agents")
+if errors.Is(err, tennis.ErrNamespaceNotFound) {
+    ns, err = db.CreateNamespace(ctx, "agents", tennis.NamespaceOptions{})
+}
+if err != nil {
+    log.Fatal(err)
+}
+```
+
+## Writing
+
+```go
+res, err := ns.Write(ctx, []tennis.Document{{ID: "a1", Text: "new text"}})
+fmt.Println(res.Written, res.Skipped, res.Chunks)
+```
+
+Writing the same ID again replaces the document and reindexes it. Documents whose text and attributes are byte-identical to what is stored are skipped entirely — not re-embedded, not re-indexed — which is what makes re-seeding a large corpus cheap.
+
+```go
+n, err := ns.Delete(ctx, []string{"a1", "a2"})   // n = how many existed
+doc, err := ns.Get(ctx, "a1")
+```
+
+## Querying
+
+```go
+ns.Query(ctx, tennis.Query{Text: "retry backoff"})                        // hybrid (default)
+ns.Query(ctx, tennis.Query{Text: "retry backoff", Mode: tennis.Keyword})  // BM25 only
+ns.Query(ctx, tennis.Query{Text: "retry backoff", Mode: tennis.Semantic}) // vectors only
+```
+
+`Query.TopK` defaults to 10. Each `Result` carries the evidence for its own ranking:
+
+```go
+type Result struct {
+    ID         string
+    Score      float64
+    Text       string         // the best-matching chunk, not the whole document
+    Attributes map[string]any
+
+    KeywordRank  int // 1-based position in each ranker, or 0 if it did not
+    SemanticRank int // surface this document at all
+}
+```
+
+`Text` is the chunk that matched, not the whole document — use `ns.Get` when you need the rest.
+
+### Tuning knobs
+
+```go
+ns.Query(ctx, tennis.Query{
+    Text:           "retry backoff",
+    RRFK:           60,   // fusion constant; lower favors each ranker's top hits
+    CandidateDepth: 100,  // chunks per ranker before fusion
+})
+```
+
+Leave these alone unless you are measuring something. `RRFK` is 60 from the original reciprocal-rank-fusion paper and behaves well untuned; raising `CandidateDepth` improves recall on large namespaces at the cost of a longer merge.
+
+## Filters
+
+```go
+tennis.Eq("status", "merged")
+tennis.NotEq("status", "failed")
+tennis.In("status", "merged", "open")
+tennis.Gt("cost", 5)
+tennis.Gte("cost", 5)
+tennis.Lt("cost", 100)
+tennis.Lte("cost", 100)
+tennis.Glob("path", "*/internal/*")
+
+tennis.And(tennis.Eq("status", "merged"), tennis.Gt("cost", 5))
+tennis.Or(tennis.Eq("status", "merged"), tennis.Eq("status", "open"))
+```
+
+Filters run before ranking, so a filtered query is faster than an unfiltered one.
+
+## Namespace options
+
+```go
+db.CreateNamespace(ctx, "notes", tennis.NamespaceOptions{
+    Model:        "potion-retrieval-32M", // built-in model (default)
+    OpenAIModel:  "",                     // set this to switch to OpenAI
+    ChunkSize:    1000,                   // target chunk width in characters
+    ChunkOverlap: 100,                    // shared between consecutive chunks
+})
+```
+
+`OpenAIModel` must be set explicitly — Tennis never reads `OPENAI_API_KEY` to decide it for you. [Embedders](/embedders#turning-on-openai) explains why that restraint matters more than the convenience would.
+
+## Listing and dropping
+
+```go
+infos, err := db.ListNamespaces(ctx)
+err = db.DropNamespace(ctx, "agents")
+fmt.Println(db.Path())
+```

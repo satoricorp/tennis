@@ -1,0 +1,75 @@
+---
+title: "How it works"
+description: "Chunking, BM25, cosine, and reciprocal rank fusion — and the reasoning behind each choice."
+---
+
+```
+your text
+   ├── chunked (~1000 chars, 100 overlap, split on paragraph/sentence boundaries)
+   ├── FTS5 index ────────► BM25 ranking ──┐
+   └── static embedder ───► cosine ranking ─┴──► reciprocal rank fusion ──► results
+                                                 stored in one SQLite file
+```
+
+## Why fuse by rank
+
+BM25 scores and cosine similarities are on incomparable scales. Normalizing them into a weighted sum requires inventing an opinion about how a 0.7 cosine compares to a BM25 of −1.3, and that opinion is wrong for some corpus.
+
+Positions in a ranking are directly comparable and need no calibration, which is why reciprocal rank fusion is the default everywhere it is used. A document's score is the sum of `1/(k + rank)` over the rankers that found it, with `k = 60` from the original paper.
+
+That arithmetic is why the numbers in the output behave the way they do. A document ranked first by both rankers scores `1/61 + 1/61 = 0.0328`. A document ranked first by only one scores `1/61 = 0.0164` — exactly half. The `[kw#1 sem#1]` tags are not decoration; they are the derivation of the score.
+
+## Why brute-force vector search
+
+There is no approximate index. At 512 dimensions a single core compares a few million vectors per second, so exact search stays comfortably fast well past the point where you would move to a server anyway.
+
+Exactness means no recall cliff, no index to tune, and no parameters that quietly degrade results as the corpus grows.
+
+## Why chunk at all
+
+The built-in model has no context limit, so chunking is not working around a truncation bug. It is working around averaging.
+
+A vector is the average of its tokens, so the longer the text the more it converges on the average of the language rather than the meaning of the passage. A ten-page document embeds to roughly nothing in particular. Chunking keeps each vector about one idea.
+
+Chunks are ~1000 characters with 100 characters of overlap, split on paragraph and then sentence boundaries, so a match spanning a boundary is still found whole. `--chunk` sets the width for a new namespace.
+
+## Why the FTS triggers matter
+
+SQLite's external-content FTS5 tables do not follow their source table automatically. Without triggers the index silently drifts on every update and delete — deleted documents keep matching, stale text keeps being returned, and nothing errors.
+
+Tennis creates those triggers in the first migration, and there is a regression test that updates and deletes a document and asserts the old terms stop matching.
+
+## Compared to sqlite-vec
+
+[sqlite-vec](https://github.com/asg017/sqlite-vec) answers "where do my vectors live" — and deliberately leaves everything else to you. Tennis makes the same core commitment (your index is one SQLite file you can open with `sqlite3`, copy, back up, or delete) and builds in the layers you would otherwise assemble around it:
+
+| | sqlite-vec | Tennis |
+|---|---|---|
+| Vector storage, exact KNN | yes | yes |
+| Embeddings | bring your own | model ships in the binary, runs offline |
+| Keyword search | separate FTS5 setup | BM25 built in |
+| Hybrid ranking | hand-written fusion SQL | reciprocal rank fusion by default |
+| Loading it | compiled C extension (in Go: cgo) | pure Go, `CGO_ENABLED=0`, one static binary |
+| Chunking, incremental indexing | yours to write | built in |
+| Embedder/index mismatch | silently wrong results | refused at open, by design |
+
+If you want raw SQL over vectors inside a database you already have, use sqlite-vec — it is very good at exactly that. Tennis is for when you want the whole retrieval loop — embed, chunk, index, fuse, filter — working in one command.
+
+## What it isn't
+
+- **Not an approximate-nearest-neighbor engine.** Exact scan only. If you have millions of vectors and need sub-millisecond search, use a vector database.
+- **Not a server.** No auth, no multi-tenancy, no replication. It's a file.
+- **Not a reranker.** Results come from BM25 and cosine fused; there is no cross-encoder pass.
+- **Not a relevance threshold.** Semantic search ranks everything, so a query always returns up to `TopK` results even when nothing is a good match. Use the score and the `kw#/sem#` tags to judge; a result found by only one ranker with a low score is usually noise.
+- **Not multimodal.** Text only.
+- **Not good at CJK keyword search.** The FTS5 tokenizer does not segment Chinese, Japanese, or Korean, so the keyword ranker finds nothing for CJK queries; semantic search still works. Fixing this properly (a trigram tokenizer) changes the index schema, so it is tracked as an issue rather than patched quietly.
+
+## The file
+
+Everything lives in `~/.tennis/db.sqlite` (or `$TENNIS_DB`, or `--db`). It is an ordinary SQLite database:
+
+```bash
+sqlite3 ~/.tennis/db.sqlite '.tables'
+```
+
+Copy it, back it up, or delete it. There is no other state except the model cache in `~/.cache/tennis`.

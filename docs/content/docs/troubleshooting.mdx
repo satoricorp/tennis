@@ -1,0 +1,148 @@
+---
+title: "Troubleshooting"
+description: "The errors Tennis raises, what each one is protecting you from, and how to clear it."
+---
+
+Tennis prefers a loud refusal to a quiet wrong answer. Most of what follows is a deliberate stop, not a bug.
+
+## "was indexed with … but the loaded embedder is …"
+
+```
+namespace "notes" was indexed with builtin:potion-retrieval-32M (512 dims) but the
+loaded embedder is openai:text-embedding-3-small (1536 dims); reindex the
+namespace or restore the original model
+```
+
+The namespace is bound to one embedder for life. You are asking it to compare vectors from two different models, and a cosine between those is not a worse score — it is a meaningless one.
+
+Either restore the original model (drop `--openai`, or set `OPENAI_API_KEY` again if the namespace really is an OpenAI one), or build a new namespace:
+
+```bash
+tennis ns create notes-v2 --openai text-embedding-3-small
+tennis add ~/Documents/notes --ns notes-v2
+```
+
+See [Embedders](/embedders#how-the-binding-is-enforced).
+
+## "openai embedder requested but OPENAI_API_KEY is not set"
+
+You passed `--openai`, or opened a namespace bound to an OpenAI model, without a key in the environment:
+
+```bash
+export OPENAI_API_KEY=sk-...
+```
+
+Tennis never reads that variable to *decide* whether to use OpenAI — only to use it once you have asked. That is why a namespace bound to OpenAI fails here instead of quietly falling back to the built-in model.
+
+## "no matches"
+
+```bash
+$ tennis search "keep me signed in" --mode keyword
+no matches
+```
+
+In `--mode keyword` this is literal: no indexed document contains those words. Drop `--mode` to let the vectors answer.
+
+In hybrid mode, `no matches` means the namespace is empty or your `--where` filter excluded everything. Check what is there:
+
+```bash
+tennis ns list
+```
+
+## "no indexable files in … (looking for .md,.txt, N skipped)"
+
+`add` indexes `.md` and `.txt` by default. Name the extensions you want:
+
+```bash
+tennis add ./src --files --ext .go,.ts,.rs
+```
+
+The `N skipped` count includes files refused for content rather than extension: files containing binary content, and files over 10MB. Both are refused with a note on stderr, because a PDF's raw bytes would index without erroring and quietly pollute every future ranking.
+
+## "does not look like a chat export" / "nothing to import from …"
+
+Detection reads the source rather than the filename, and it can be wrong about an unusual archive. Name the format:
+
+```bash
+tennis add --chatgpt ~/Downloads/export.zip
+tennis add --claude ~/Downloads/export.zip
+tennis add --claude-code ~/.claude
+tennis add --codex ~/.codex
+tennis add --files ./whatever
+```
+
+`nothing to import from X (read as Y)` means detection picked `Y` and found no documents in it — usually the wrong `Y`. See [Importing sessions](/importing#how-detection-works).
+
+## "--format X contradicts --Y" / "--X and --Y name different sources"
+
+You passed two source flags that disagree, e.g. `--claude --codex`, or `--format files --chatgpt`. Pick one.
+
+## "checksum mismatch for …"
+
+```
+checksum mismatch for potion-retrieval-32M/model.safetensors:
+  got  a1b2…
+  want c3d4…
+the upstream file changed or the download was corrupted; refusing to use it
+```
+
+Model downloads are verified against SHA-256 checksums pinned in the source. A corrupted download is the common cause — clear the cache and retry:
+
+```bash
+rm -rf ~/.cache/tennis && tennis search "anything"
+```
+
+If it persists, the upstream file genuinely changed, which is a bug to report rather than work around: a silently different model would change every vector the install ever produces.
+
+## "cannot parse filter … (want key=value, key>value, …)"
+
+`--where` takes comma-separated comparisons, no spaces around the operator:
+
+```bash
+tennis search "auth" --where 'status=merged'
+tennis search "auth" --where 'cost>5,status!=failed'
+tennis search "flaky test" --where project=tennis,branch=main
+```
+
+Supported operators are `=`, `!=`, `>`, `>=`, `<`, `<=`.
+
+## "invalid namespace name" / "invalid attribute name"
+
+Namespaces take letters, digits, dash, and underscore, up to 64 characters, and must start with a letter or digit. Attribute names additionally allow dots.
+
+## "N line(s) failed to parse" from put
+
+```bash
+$ tennis put agents --json < events.ndjson
+tennis: put: line 3: unexpected end of JSON input
+{
+  "chunks": 2,
+  "failed": 1,
+  "skipped": 0,
+  "written": 2
+}
+error: 1 line(s) failed to parse
+```
+
+Bad lines are reported with their line number and skipped; the good ones are still written. `put` exits nonzero so a script notices. Each line needs `id` and `text`.
+
+## Results are there, but bad
+
+Tennis has no relevance threshold — semantic search ranks everything, so a query always returns up to `-n` results even when nothing is a good match. Read the evidence rather than the position:
+
+- A hit tagged with only one ranker (`[sem#3]`) at a low score is usually noise.
+- A hit both rankers put first scores about `0.0328`; one ranker alone tops out near `0.0164`. See [why fuse by rank](/how-it-works#why-fuse-by-rank).
+
+If keyword search finds nothing for Chinese, Japanese, or Korean text, that is a known limitation: the FTS5 tokenizer does not segment CJK. Semantic search still works.
+
+## Starting over
+
+The database is one ordinary SQLite file, and the model cache is a directory:
+
+```bash
+tennis ns drop notes          # one namespace
+rm ~/.tennis/db.sqlite        # everything indexed
+rm -rf ~/.cache/tennis        # the downloaded model
+```
+
+Nothing else on your machine is state.

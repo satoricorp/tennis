@@ -19,6 +19,8 @@ tennis add ~/Documents/notes
 tennis search "keep me signed in"
 ```
 
+📖 **[Documentation](https://satoricorp.github.io/tennis/docs)** · [Discord](https://discord.gg/JpAggvxJJ) · [llms.txt](https://satoricorp.github.io/tennis/docs/llms.txt)
+
 ---
 
 ## Install

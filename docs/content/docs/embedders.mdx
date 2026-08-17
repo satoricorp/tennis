@@ -1,0 +1,75 @@
+---
+title: "Embedders"
+description: "The built-in static model, switching to OpenAI, and why a namespace is bound to one embedder for life."
+---
+
+Every namespace records its embedder at creation and is bound to it forever. That constraint is the most opinionated thing about Tennis, and this page explains why it is a feature.
+
+## The built-in model
+
+`potion-retrieval-32M` is a *static* embedding model: a lookup table of vectors rather than a neural network. Embedding a string is a tokenize, a table lookup, and an average — no inference engine, no ONNX runtime, no cgo. That is what lets Tennis be one static binary.
+
+It is genuinely weaker than a large hosted model — roughly 82% of `all-MiniLM-L6-v2` on retrieval benchmarks, which is itself behind OpenAI's. In a hybrid ranking that gap narrows considerably, because the queries a static model handles worst (exact identifiers, rare tokens, code symbols) are exactly the ones BM25 handles best.
+
+It also has no context window, so unlike a transformer-based embedder it will never silently ignore everything past token 512.
+
+| Model | Size | Dimensions |
+|---|---|---|
+| `potion-retrieval-32M` (default) | ~123MB | 512 |
+| `potion-base-8M` | ~29MB | 256 |
+
+```bash
+tennis ns create notes --model potion-base-8M
+```
+
+The model downloads once to `~/.cache/tennis` and is verified against a SHA-256 checksum pinned in the source — a changed upstream file is refused rather than silently embedded into every vector the install ever produces.
+
+## Turning on OpenAI
+
+```bash
+export OPENAI_API_KEY=sk-...
+tennis ns create notes --openai text-embedding-3-small
+```
+
+```go
+db.CreateNamespace(ctx, "notes", tennis.NamespaceOptions{
+    OpenAIModel: "text-embedding-3-small",
+})
+```
+
+**You have to ask for this.** Tennis will not check for `OPENAI_API_KEY` and quietly use it.
+
+That restraint is deliberate. Vectors from two different models live in different spaces and different dimensions — a cosine between them is not a worse score, it is a meaningless one. If the embedder were chosen by whichever environment variables happened to be set, a namespace indexed with a key present and later queried from a cron job, a different shell, or CI would return confident nonsense. No error, no crash, just wrong answers that look right. That is the worst failure a search tool can have, so it is designed out rather than documented around.
+
+Choosing OpenAI also gives up two of the three things Tennis promises: it is no longer offline, and no longer free.
+
+## How the binding is enforced
+
+Every namespace records its embedder's ID and dimension at creation. Every later open verifies the live embedder against those, and refuses on mismatch:
+
+```
+namespace "notes" was indexed with builtin:potion-retrieval-32M (512 dims) but the
+loaded embedder is openai:text-embedding-3-small (1536 dims); reindex the
+namespace or restore the original model
+```
+
+`tennis ns list` shows what each namespace is bound to:
+
+```bash
+$ tennis ns list
+NAMESPACE            EMBEDDER                             DIMS     DOCS   CHUNKS
+agents               builtin:potion-retrieval-32M          512        2        2
+context              builtin:potion-retrieval-32M          512        3        3
+```
+
+## Changing models
+
+To change models, create a new namespace and re-index it:
+
+```bash
+tennis ns create notes-v2 --openai text-embedding-3-small
+tennis add ~/Documents/notes --ns notes-v2
+tennis ns drop notes
+```
+
+That is a real cost, and it is meant to be — it makes the expensive operation visible instead of letting it happen by accident.

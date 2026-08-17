@@ -1,0 +1,107 @@
+---
+title: "HTTP API"
+description: "tennis serve exposes write, query, delete, and list over loopback — for every language that isn't Go."
+---
+
+`tennis serve` puts the same engine behind a small HTTP API, so Python, TypeScript, Ruby, or anything else can use it without a binding.
+
+```bash
+tennis serve                       # 127.0.0.1:8817
+tennis serve --addr 127.0.0.1:9000
+tennis serve --db /path/to/db.sqlite
+```
+
+<Callout type="warn" title="It binds to loopback, and it has no auth">
+This is an interface to a local file, not a service. `--addr` will bind anywhere you tell it to; don't, unless you have put something in front of it.
+</Callout>
+
+## Endpoints
+
+| Method | Path | Does |
+|---|---|---|
+| `GET` | `/v1/namespaces` | list namespaces |
+| `POST` | `/v1/namespaces/{ns}/write` | upsert documents |
+| `POST` | `/v1/namespaces/{ns}/query` | search |
+| `POST` | `/v1/namespaces/{ns}/delete` | delete by id |
+| `GET` | `/health` | liveness |
+
+## Write
+
+```bash
+curl -s localhost:8817/v1/namespaces/notes/write -d '{
+  "documents": [
+    {"id": "a1", "text": "make the login flow remember the user",
+     "attributes": {"status": "merged"}}
+  ]
+}'
+# {"written":1,"skipped":0,"chunks":1}
+```
+
+The namespace is created on first write, bound to the built-in model. To bind it to something else, create it first with [`tennis ns create`](/cli#tennis-ns).
+
+## Query
+
+```bash
+curl -s localhost:8817/v1/namespaces/notes/query -d '{
+  "text": "keep me signed in", "top_k": 5, "where": "status=merged"
+}'
+# {"results":[{"id":"a1","score":0.0164,"text":"...","attributes":{"status":"merged"},"keyword_rank":0,"semantic_rank":1}]}
+```
+
+`where` takes the same syntax as `--where` on the CLI: `key=value`, `key!=value`, `key>value`, comma-separated. `keyword_rank` and `semantic_rank` are 1-based, and `0` means that ranker did not surface the document at all.
+
+## List and delete
+
+```bash
+curl -s localhost:8817/v1/namespaces
+curl -s localhost:8817/v1/namespaces/notes/delete -d '{"ids": ["a1"]}'
+curl -s localhost:8817/health
+```
+
+## Python client, in full
+
+```python
+import requests
+
+BASE = "http://localhost:8817/v1"
+
+def write(ns, docs):
+    return requests.post(f"{BASE}/namespaces/{ns}/write", json={"documents": docs}).json()
+
+def match(ns, text, top_k=10, where=""):
+    r = requests.post(f"{BASE}/namespaces/{ns}/query",
+                      json={"text": text, "top_k": top_k, "where": where})
+    r.raise_for_status()
+    return r.json()["results"]
+
+write("notes", [{"id": "a1", "text": "make the login flow remember the user"}])
+for hit in match("notes", "keep me signed in"):
+    print(f'{hit["score"]:.4f}  {hit["id"]}  {hit["text"][:60]}')
+```
+
+## TypeScript client, in full
+
+```ts
+const BASE = "http://localhost:8817/v1";
+
+export async function write(ns: string, documents: unknown[]) {
+  const r = await fetch(`${BASE}/namespaces/${ns}/write`, {
+    method: "POST",
+    body: JSON.stringify({ documents }),
+  });
+  if (!r.ok) throw new Error(await r.text());
+  return r.json();
+}
+
+export async function match(ns: string, text: string, topK = 10, where = "") {
+  const r = await fetch(`${BASE}/namespaces/${ns}/query`, {
+    method: "POST",
+    body: JSON.stringify({ text, top_k: topK, where }),
+  });
+  if (!r.ok) throw new Error(await r.text());
+  return (await r.json()).results;
+}
+
+await write("notes", [{ id: "a1", text: "make the login flow remember the user" }]);
+console.log(await match("notes", "keep me signed in"));
+```
