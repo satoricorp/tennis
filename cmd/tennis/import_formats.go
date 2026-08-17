@@ -570,6 +570,165 @@ func ccText(raw json.RawMessage) string {
 	return strings.Join(parts, "\n")
 }
 
+// --- codex -----------------------------------------------------------------
+
+// A Codex rollout line. Every record shares one envelope, and which payload
+// matters depends on the type, so the payload is decoded lazily per type.
+type codexLine struct {
+	Timestamp string          `json:"timestamp"`
+	Type      string          `json:"type"`
+	Payload   json.RawMessage `json:"payload"`
+}
+
+// The opening record of a rollout, and the only place the session's real
+// identity is written down.
+type codexMeta struct {
+	ID        string `json:"id"`
+	Timestamp string `json:"timestamp"`
+	CWD       string `json:"cwd"`
+}
+
+type codexEvent struct {
+	Type    string `json:"type"`
+	Message string `json:"message"`
+}
+
+// importCodex reads local Codex transcripts: one JSONL rollout per session,
+// as written under ~/.codex/sessions and ~/.codex/archived_sessions.
+func importCodex(a *archive, per string, sink *docSink, warn func(string)) (int, int, error) {
+	sessions, failed := 0, 0
+	for _, e := range a.entries {
+		if !strings.EqualFold(path.Ext(e.path), ".jsonl") {
+			continue
+		}
+		f, err := a.open(e.path)
+		if err != nil {
+			failed++
+			warn(err.Error())
+			continue
+		}
+		conv, bad := readCodexSession(f, e.path, warn)
+		f.Close()
+		failed += bad
+		// ~/.codex also holds history.jsonl and session_index.jsonl, which
+		// share the extension but none of the shape. They yield no turns, and
+		// skipping them here is what lets a person point at the whole
+		// directory instead of naming the rollouts.
+		if len(conv.turns) == 0 {
+			continue
+		}
+		sessions++
+		if err := conv.emit(per, sink); err != nil {
+			return sessions, failed, err
+		}
+	}
+	return sessions, failed, nil
+}
+
+// readCodexSession pulls the conversation out of a rollout.
+//
+// A rollout records the same exchange twice: once as response_item, the raw
+// model traffic including the AGENTS.md preamble injected as a user turn, and
+// once as event_msg, the events the interface actually showed. This reads the
+// event_msg side, because what a person remembers saying is what they typed,
+// not what the harness prepended to it.
+func readCodexSession(r io.Reader, entry string, warn func(string)) (conversation, int) {
+	conv := conversation{
+		source: formatCodex,
+		id:     strings.TrimSuffix(path.Base(entry), path.Ext(entry)),
+		extra:  map[string]any{},
+	}
+
+	sc := bufio.NewScanner(r)
+	sc.Buffer(make([]byte, 64*1024), maxImportLineSize)
+
+	failed, n := 0, 0
+	for sc.Scan() {
+		n++
+		raw := strings.TrimSpace(sc.Text())
+		if raw == "" {
+			continue
+		}
+		var l codexLine
+		if err := json.Unmarshal([]byte(raw), &l); err != nil {
+			failed++
+			warn(fmt.Sprintf("%s: line %d: %v", entry, n, err))
+			continue
+		}
+		if len(l.Payload) == 0 {
+			continue
+		}
+
+		switch l.Type {
+		case "session_meta":
+			var m codexMeta
+			if json.Unmarshal(l.Payload, &m) != nil {
+				continue
+			}
+			// The rollout filename already carries this UUID, but a copied or
+			// renamed file would lose it, and the ID is what makes a re-import
+			// update a document instead of duplicating it.
+			if m.ID != "" {
+				conv.id = m.ID
+			}
+			if m.CWD != "" {
+				conv.extra["cwd"] = m.CWD
+				conv.extra["project"] = path.Base(m.CWD)
+			}
+			if conv.create == "" {
+				conv.create = normalizeTime(firstNonEmpty(m.Timestamp, l.Timestamp))
+			}
+
+		case "event_msg":
+			var e codexEvent
+			if json.Unmarshal(l.Payload, &e) != nil {
+				continue
+			}
+			var role string
+			switch e.Type {
+			case "user_message":
+				role = "user"
+			case "agent_message":
+				role = "assistant"
+			default:
+				// Everything else on this channel is telemetry: token counts,
+				// task_started, patch results.
+				continue
+			}
+			text := strings.TrimSpace(e.Message)
+			if text == "" {
+				continue
+			}
+			if conv.create == "" {
+				conv.create = normalizeTime(l.Timestamp)
+			}
+			// Line number, not position in the turn list: it is stable across
+			// re-imports of the same file, which is what the unchanged-skip
+			// depends on.
+			conv.turns = append(conv.turns, turn{
+				id:      "line" + strconv.Itoa(n),
+				role:    role,
+				text:    text,
+				created: normalizeTime(l.Timestamp),
+			})
+		}
+	}
+	if err := sc.Err(); err != nil {
+		failed++
+		warn(fmt.Sprintf("%s: %v", entry, err))
+	}
+
+	// A rollout names nothing. The first thing asked is what the session was
+	// about, and it is the only label a result can carry that a person recognizes.
+	for _, t := range conv.turns {
+		if t.role == "user" {
+			conv.title = truncate(strings.Join(strings.Fields(t.text), " "), 72)
+			break
+		}
+	}
+	return conv, failed
+}
+
 // --- shared helpers --------------------------------------------------------
 
 func firstNonEmpty(vals ...string) string {

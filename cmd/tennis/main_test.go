@@ -123,3 +123,85 @@ func TestTruncate(t *testing.T) {
 		t.Errorf("cut: %q", got)
 	}
 }
+
+// --- the namespace ----------------------------------------------------------
+
+func TestResolveNS(t *testing.T) {
+	t.Setenv("TENNIS_NS", "")
+	if got := resolveNS(""); got != defaultNamespace {
+		t.Errorf("nothing set: got %q, want %q", got, defaultNamespace)
+	}
+	if got := resolveNS("work"); got != "work" {
+		t.Errorf("--ns should win: got %q", got)
+	}
+	t.Setenv("TENNIS_NS", "fromenv")
+	if got := resolveNS(""); got != "fromenv" {
+		t.Errorf("$TENNIS_NS should be used: got %q", got)
+	}
+	// The flag is the more specific statement of intent, so it outranks the
+	// environment the same way --db outranks $TENNIS_DB.
+	if got := resolveNS("work"); got != "work" {
+		t.Errorf("--ns should outrank $TENNIS_NS: got %q", got)
+	}
+}
+
+// --- the result line --------------------------------------------------------
+
+func TestCitation(t *testing.T) {
+	cases := []struct {
+		name string
+		r    tennis.Result
+		want string
+	}{
+		{
+			"an imported session names its service and day",
+			tennis.Result{Score: 0.0231, Attributes: map[string]any{
+				"source": "chatgpt", "created": "2025-03-15T09:12:00Z",
+			}},
+			"ChatGPT [2025-03-15] 0.0231",
+		},
+		{
+			"the hyphenated source is spelled the way it is said",
+			tennis.Result{Score: 0.5, Attributes: map[string]any{
+				"source": "claude-code", "created": "2026-06-09T19:25:08Z",
+			}},
+			"Claude Code [2026-06-09] 0.5000",
+		},
+		{
+			"codex",
+			tennis.Result{Score: 0.25, Attributes: map[string]any{
+				"source": "codex", "created": "2026-06-09T19:25:08Z",
+			}},
+			"Codex [2026-06-09] 0.2500",
+		},
+		{
+			// A seeded file has no source attribute at all.
+			"a file falls back to its name and mtime",
+			tennis.Result{Score: 0.125, Attributes: map[string]any{
+				"name": "auth.md", "modified": "2026-08-17T00:00:00Z",
+			}},
+			"auth.md [2026-08-17] 0.1250",
+		},
+		{
+			// Undated documents are real: put accepts anything with an id.
+			"no date leaves the brackets off rather than printing an empty one",
+			tennis.Result{Score: 0.75, Attributes: map[string]any{"source": "claude"}},
+			"Claude 0.7500",
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := citation(c.r); got != c.want {
+				t.Errorf("citation() = %q, want %q", got, c.want)
+			}
+		})
+	}
+}
+
+// A result's text is a chunk of a transcript, so it arrives with the newlines
+// and runs of spaces it was written with. The answer line is one line.
+func TestOneLine(t *testing.T) {
+	if got := oneLine("You stayed at\n  Hotel Esencia\n\nin Tulum.\n"); got != "You stayed at Hotel Esencia in Tulum." {
+		t.Errorf("oneLine() = %q", got)
+	}
+}

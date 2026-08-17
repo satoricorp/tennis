@@ -29,19 +29,32 @@ USAGE
   tennis <command> [flags]
 
 COMMANDS
-  seed <namespace> <path...>   index files or directories
-  import <namespace> <path...> index a chat export (.zip, directory, or transcript)
+  add <path...>                index sessions or files
+  search <query>               search
   put <namespace>              ingest NDJSON documents from stdin
-  match <namespace> <query>    search
   get <namespace> <id>         print one document
   rm <namespace> <id...>       delete documents
   ns [list|create|drop]        manage namespaces
   serve                        start the local HTTP API
   version
 
+SOURCES
+  tennis add --chatgpt <export.zip>       a ChatGPT export
+  tennis add --claude <export.zip>        a Claude export
+  tennis add --claude-code ~/.claude      Claude Code transcripts
+  tennis add --codex ~/.codex             Codex transcripts
+  tennis add --files ~/Documents/notes    plain files
+  Without a source flag, add reads the path and works out which it is.
+
 COMMON FLAGS
   --db <path>    database file (default ~/.tennis/db.sqlite, or $TENNIS_DB)
+  --ns <name>    namespace for add and search (default ` + defaultNamespace + `, or $TENNIS_NS)
   --json         machine-readable output
+
+NAMING THE NAMESPACE POSITIONALLY
+  seed <namespace> <path...>   like add --files
+  import <namespace> <path...> like add
+  match <namespace> <query>    like search
 
 Run 'tennis <command> --help' for command flags.
 `
@@ -56,6 +69,10 @@ func main() {
 
 	var err error
 	switch cmd {
+	case "add":
+		err = cmdAdd(args)
+	case "search":
+		err = cmdSearch(args)
 	case "seed":
 		err = cmdSeed(args)
 	case "import":
@@ -129,6 +146,27 @@ func defaultDB() string {
 		return p
 	}
 	return "~/.tennis/db.sqlite"
+}
+
+// defaultNamespace is where add and search go when nothing says otherwise.
+//
+// Namespaces earn their keep when you are keeping separate things separate,
+// but that is a second question, and asking it before the first import is what
+// makes a search tool feel like a database. One place to put things is the
+// honest default; --ns is there the moment one place stops being enough.
+const defaultNamespace = "context"
+
+// resolveNS reads the namespace from the flag, the environment, or the
+// default, in that order — the same precedence defaultDB uses, so the two
+// knobs behave alike.
+func resolveNS(flagVal string) string {
+	if flagVal != "" {
+		return flagVal
+	}
+	if v := os.Getenv("TENNIS_NS"); v != "" {
+		return v
+	}
+	return defaultNamespace
 }
 
 // open connects and reports model downloads to stderr, so progress never
@@ -293,13 +331,27 @@ func isBinary(content []byte) bool {
 	return false
 }
 
+// cmdSearch answers a question against the default namespace.
+func cmdSearch(args []string) error {
+	fs_ := flag.NewFlagSet("search", flag.ExitOnError)
+	var o searchOpts
+	registerSearchFlags(fs_, &o)
+	nsName := fs_.String("ns", "", "namespace (default "+defaultNamespace+", or $TENNIS_NS)")
+	pos, err := parseInterleaved(fs_, args)
+	if err != nil {
+		return err
+	}
+	if len(pos) < 1 {
+		return fmt.Errorf("usage: tennis search <query>")
+	}
+	return runSearch(resolveNS(*nsName), strings.Join(pos, " "), o)
+}
+
+// cmdMatch is search with the namespace named positionally.
 func cmdMatch(args []string) error {
 	fs_ := flag.NewFlagSet("match", flag.ExitOnError)
-	dbPath := fs_.String("db", defaultDB(), "database file")
-	asJSON := fs_.Bool("json", false, "machine-readable output")
-	topK := fs_.Int("n", 10, "how many results")
-	mode := fs_.String("mode", "hybrid", "hybrid | keyword | semantic")
-	where := fs_.String("where", "", "attribute filter, e.g. status=merged (repeat with commas)")
+	var o searchOpts
+	registerSearchFlags(fs_, &o)
 	pos, err := parseInterleaved(fs_, args)
 	if err != nil {
 		return err
@@ -307,10 +359,27 @@ func cmdMatch(args []string) error {
 	if len(pos) < 2 {
 		return fmt.Errorf("usage: tennis match <namespace> <query>")
 	}
-	nsName := pos[0]
-	query := strings.Join(pos[1:], " ")
+	return runSearch(pos[0], strings.Join(pos[1:], " "), o)
+}
 
-	db, err := open(*dbPath, *asJSON)
+type searchOpts struct {
+	dbPath string
+	asJSON bool
+	topK   int
+	mode   string
+	where  string
+}
+
+func registerSearchFlags(fs_ *flag.FlagSet, o *searchOpts) {
+	fs_.StringVar(&o.dbPath, "db", defaultDB(), "database file")
+	fs_.BoolVar(&o.asJSON, "json", false, "machine-readable output")
+	fs_.IntVar(&o.topK, "n", 10, "how many results")
+	fs_.StringVar(&o.mode, "mode", "hybrid", "hybrid | keyword | semantic")
+	fs_.StringVar(&o.where, "where", "", "attribute filter, e.g. status=merged (repeat with commas)")
+}
+
+func runSearch(nsName, query string, o searchOpts) error {
+	db, err := open(o.dbPath, o.asJSON)
 	if err != nil {
 		return err
 	}
@@ -321,25 +390,33 @@ func cmdMatch(args []string) error {
 	if err != nil {
 		return err
 	}
-	filter, err := parseWhere(*where)
+	filter, err := parseWhere(o.where)
 	if err != nil {
 		return err
 	}
 
 	results, err := ns.Query(ctx, tennis.Query{
-		Text: query, TopK: *topK, Mode: tennis.Mode(*mode), Filter: filter,
+		Text: query, TopK: o.topK, Mode: tennis.Mode(o.mode), Filter: filter,
 	})
 	if err != nil {
 		return err
 	}
-	if *asJSON {
+	if o.asJSON {
 		return emit(results)
 	}
 	if len(results) == 0 {
 		fmt.Println("no matches")
 		return nil
 	}
-	for i, r := range results {
+
+	// The best hit is the answer, so it is printed as one: the words, then
+	// where they came from. Everything below it is the runners-up, and those
+	// keep the ranked-list shape because comparing them is the point.
+	top := results[0]
+	fmt.Printf("> %s\n", truncate(oneLine(top.Text), 100))
+	fmt.Printf("  %s\n", citation(top))
+
+	for i, r := range results[1:] {
 		// Showing which ranker found a result makes the ranking legible: a hit
 		// only the semantic side surfaced is a different kind of answer than
 		// one both agreed on.
@@ -350,10 +427,65 @@ func cmdMatch(args []string) error {
 		if r.SemanticRank > 0 {
 			found = append(found, fmt.Sprintf("sem#%d", r.SemanticRank))
 		}
-		fmt.Printf("%2d. %-28s %.4f  [%s]\n", i+1, truncate(displayID(r), 28), r.Score, strings.Join(found, " "))
-		fmt.Printf("    %s\n", truncate(strings.ReplaceAll(r.Text, "\n", " "), 100))
+		if i == 0 {
+			fmt.Println()
+		}
+		fmt.Printf("%2d. %s  [%s]\n", i+2, citation(r), strings.Join(found, " "))
+		fmt.Printf("    %s\n", truncate(oneLine(r.Text), 100))
 	}
 	return nil
+}
+
+// citation is the line under a result: where it came from, when, how strongly
+// it matched.
+func citation(r tennis.Result) string {
+	if d := resultDate(r); d != "" {
+		return fmt.Sprintf("%s [%s] %.4f", sourceLabel(r), d, r.Score)
+	}
+	return fmt.Sprintf("%s %.4f", sourceLabel(r), r.Score)
+}
+
+// sourceLabel names where a result came from the way a person would say it
+// out loud, rather than the way it is spelled in an attribute.
+func sourceLabel(r tennis.Result) string {
+	s, _ := r.Attributes["source"].(string)
+	switch s {
+	case formatChatGPT:
+		return "ChatGPT"
+	case formatClaude:
+		return "Claude"
+	case formatClaudeCode:
+		return "Claude Code"
+	case formatCodex:
+		return "Codex"
+	case "":
+		// A seeded file has no source. Its name is what identifies it.
+		return truncate(displayID(r), 40)
+	}
+	return s
+}
+
+// resultDate reduces a timestamp to the day, which is the precision a person
+// reads a citation at.
+func resultDate(r tennis.Result) string {
+	s, _ := r.Attributes["created"].(string)
+	if s == "" {
+		s, _ = r.Attributes["modified"].(string)
+	}
+	if s == "" {
+		return ""
+	}
+	if t, err := time.Parse(time.RFC3339, s); err == nil {
+		return t.Format("2006-01-02")
+	}
+	if len(s) >= 10 {
+		return s[:10]
+	}
+	return s
+}
+
+func oneLine(s string) string {
+	return strings.Join(strings.Fields(s), " ")
 }
 
 func cmdGet(args []string) error {

@@ -30,6 +30,7 @@ const (
 	formatClaude     = "claude"
 	formatChatGPT    = "chatgpt"
 	formatClaudeCode = "claude-code"
+	formatCodex      = "codex"
 	formatFiles      = "files"
 )
 
@@ -54,14 +55,8 @@ const (
 // which export it is, and turns it into documents.
 func cmdImport(args []string) error {
 	fs_ := flag.NewFlagSet("import", flag.ExitOnError)
-	dbPath := fs_.String("db", defaultDB(), "database file")
-	asJSON := fs_.Bool("json", false, "machine-readable output")
-	format := fs_.String("format", formatAuto, "auto | chatgpt | claude | claude-code | files")
-	per := fs_.String("per", perTurn, "one document per turn | conversation")
-	ext := fs_.String("ext", ".md,.txt", "extensions to index when the archive is only files")
-	model := fs_.String("model", "", "built-in model for a new namespace (default "+embed.DefaultModel+")")
-	openaiModel := fs_.String("openai", "", "use an OpenAI model instead of the built-in one (requires OPENAI_API_KEY)")
-	chunkSize := fs_.Int("chunk", 0, "chunk size in characters for a new namespace")
+	var o importOpts
+	registerImportFlags(fs_, &o)
 	pos, err := parseInterleaved(fs_, args)
 	if err != nil {
 		return err
@@ -69,7 +64,81 @@ func cmdImport(args []string) error {
 	if len(pos) < 2 {
 		return fmt.Errorf("usage: tennis import <namespace> <path...>")
 	}
-	nsName, paths := pos[0], pos[1:]
+	return runImport(pos[0], pos[1:], o)
+}
+
+// cmdAdd is the front door: the same machinery as import, spelled the way the
+// source is spelled out loud. "--chatgpt" says what the archive is, which is
+// the thing a person knows, where "--format chatgpt" asks them to know that
+// tennis has a notion of formats first.
+func cmdAdd(args []string) error {
+	fs_ := flag.NewFlagSet("add", flag.ExitOnError)
+	var o importOpts
+	registerImportFlags(fs_, &o)
+	nsName := fs_.String("ns", "", "namespace (default "+defaultNamespace+", or $TENNIS_NS)")
+
+	sources := map[string]*bool{
+		formatChatGPT:    fs_.Bool(formatChatGPT, false, "read the source as a ChatGPT export"),
+		formatClaude:     fs_.Bool(formatClaude, false, "read the source as a Claude export"),
+		formatClaudeCode: fs_.Bool(formatClaudeCode, false, "read the source as Claude Code transcripts"),
+		formatCodex:      fs_.Bool(formatCodex, false, "read the source as Codex transcripts"),
+		formatFiles:      fs_.Bool(formatFiles, false, "read the source as plain files"),
+	}
+	pos, err := parseInterleaved(fs_, args)
+	if err != nil {
+		return err
+	}
+
+	// Two source flags is not a request tennis can honour, and picking one
+	// silently would import the archive as the wrong thing.
+	var chosen []string
+	for _, name := range sortedKeys(sources) {
+		if *sources[name] {
+			chosen = append(chosen, name)
+		}
+	}
+	switch {
+	case len(chosen) > 1:
+		return fmt.Errorf("--%s and --%s name different sources; pick one", chosen[0], chosen[1])
+	case len(chosen) == 1:
+		if o.format != formatAuto && o.format != chosen[0] {
+			return fmt.Errorf("--format %s contradicts --%s", o.format, chosen[0])
+		}
+		o.format = chosen[0]
+	}
+	if len(pos) < 1 {
+		return fmt.Errorf("usage: tennis add [--chatgpt|--claude|--claude-code|--codex|--files] <path...>")
+	}
+	return runImport(resolveNS(*nsName), pos, o)
+}
+
+// importOpts is what import and add both collect; they differ only in how the
+// namespace and the source are spelled.
+type importOpts struct {
+	dbPath      string
+	asJSON      bool
+	format      string
+	per         string
+	ext         string
+	model       string
+	openaiModel string
+	chunkSize   int
+}
+
+func registerImportFlags(fs_ *flag.FlagSet, o *importOpts) {
+	fs_.StringVar(&o.dbPath, "db", defaultDB(), "database file")
+	fs_.BoolVar(&o.asJSON, "json", false, "machine-readable output")
+	fs_.StringVar(&o.format, "format", formatAuto, "auto | chatgpt | claude | claude-code | codex | files")
+	fs_.StringVar(&o.per, "per", perTurn, "one document per turn | conversation")
+	fs_.StringVar(&o.ext, "ext", ".md,.txt", "extensions to index when the source is only files")
+	fs_.StringVar(&o.model, "model", "", "built-in model for a new namespace (default "+embed.DefaultModel+")")
+	fs_.StringVar(&o.openaiModel, "openai", "", "use an OpenAI model instead of the built-in one (requires OPENAI_API_KEY)")
+	fs_.IntVar(&o.chunkSize, "chunk", 0, "chunk size in characters for a new namespace")
+}
+
+func runImport(nsName string, paths []string, o importOpts) error {
+	dbPath, asJSON, format, per, ext := &o.dbPath, &o.asJSON, &o.format, &o.per, &o.ext
+	model, openaiModel, chunkSize := &o.model, &o.openaiModel, &o.chunkSize
 
 	if err := validFormat(*format); err != nil {
 		return err
@@ -158,10 +227,10 @@ func cmdImport(args []string) error {
 
 func validFormat(f string) error {
 	switch f {
-	case formatAuto, formatClaude, formatChatGPT, formatClaudeCode, formatFiles:
+	case formatAuto, formatClaude, formatChatGPT, formatClaudeCode, formatCodex, formatFiles:
 		return nil
 	}
-	return fmt.Errorf("unknown --format %q (want auto, chatgpt, claude, claude-code, files)", f)
+	return fmt.Errorf("unknown --format %q (want auto, chatgpt, claude, claude-code, codex, files)", f)
 }
 
 func validPer(p string) (string, error) {
@@ -232,6 +301,12 @@ func importPath(p, format, per, ext string, sink *docSink, warn func(string), qu
 
 	case formatClaudeCode:
 		conversations, failed, err = importClaudeCode(a, per, sink, warn)
+		if err != nil {
+			return nil, err
+		}
+
+	case formatCodex:
+		conversations, failed, err = importCodex(a, per, sink, warn)
 		if err != nil {
 			return nil, err
 		}
@@ -398,6 +473,8 @@ func (p plan) describe() string {
 		return "a Claude export (" + p.payload + ")"
 	case formatClaudeCode:
 		return "Claude Code session transcripts"
+	case formatCodex:
+		return "Codex session transcripts"
 	default:
 		return "plain files"
 	}
@@ -413,7 +490,7 @@ func (a *archive) detect(want string) (plan, error) {
 			return plan{}, fmt.Errorf("%s: no conversations.json in this %s", a.display, sourceKind(a))
 		}
 		return plan{format: want, payload: p, extra: a.find("projects.json")}, nil
-	case formatClaudeCode, formatFiles:
+	case formatClaudeCode, formatCodex, formatFiles:
 		return plan{format: want}, nil
 	}
 
@@ -430,18 +507,29 @@ func (a *archive) detect(want string) (plan, error) {
 		return plan{format: shape, payload: p, extra: a.find("projects.json")}, nil
 	}
 
+	// Both agent transcripts are directories of JSONL, so telling them apart
+	// means reading one. Each sniff gets its own handle because sniffing
+	// consumes the reader.
 	for _, e := range a.entries {
 		if !strings.EqualFold(path.Ext(e.path), ".jsonl") {
 			continue
 		}
-		f, err := a.open(e.path)
-		if err != nil {
-			continue
-		}
-		ok := sniffClaudeCode(f)
-		f.Close()
-		if ok {
-			return plan{format: formatClaudeCode}, nil
+		for _, s := range []struct {
+			format string
+			sniff  func(io.Reader) bool
+		}{
+			{formatClaudeCode, sniffClaudeCode},
+			{formatCodex, sniffCodex},
+		} {
+			f, err := a.open(e.path)
+			if err != nil {
+				continue
+			}
+			ok := s.sniff(f)
+			f.Close()
+			if ok {
+				return plan{format: s.format}, nil
+			}
 		}
 		break
 	}
@@ -500,6 +588,31 @@ func sniffClaudeCode(r io.Reader) bool {
 			continue
 		}
 		if probe.SessionID != "" || (probe.UUID != "" && probe.Type != "") {
+			return true
+		}
+	}
+	return false
+}
+
+// sniffCodex looks for the envelope every rollout line is wrapped in. Codex
+// records no uuid or sessionId, which is exactly what sniffClaudeCode keys on,
+// so the two never claim the same file.
+func sniffCodex(r io.Reader) bool {
+	sc := bufio.NewScanner(r)
+	sc.Buffer(make([]byte, 64*1024), maxImportLineSize)
+	for i := 0; i < 5 && sc.Scan(); i++ {
+		var probe struct {
+			Type    string          `json:"type"`
+			Payload json.RawMessage `json:"payload"`
+		}
+		if json.Unmarshal(sc.Bytes(), &probe) != nil {
+			continue
+		}
+		if len(probe.Payload) == 0 {
+			continue
+		}
+		switch probe.Type {
+		case "session_meta", "response_item", "event_msg", "turn_context":
 			return true
 		}
 	}

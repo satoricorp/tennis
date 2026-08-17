@@ -6,7 +6,7 @@ import styles from "./Hero.module.css";
 // One source of truth for the strings that appear in more than one place.
 const REPO = "github.com/satoricorp/tennis";
 const INSTALL = `go install ${REPO}/cmd/tennis@latest`;
-const ADD = "tennis add --chatgpt";
+const ADD = "tennis add --chatgpt ~/Downloads/chatgpt-export.zip";
 const SEARCH = 'tennis search "What hotel did we stay at in Mexico last year?"';
 const SESSION = `${ADD}\n${SEARCH}`;
 

@@ -60,6 +60,19 @@ const claudeCodeSession = `{"type":"summary","summary":"Fixing the flaky auth te
 {"type":"user","uuid":"meta1","isMeta":true,"sessionId":"S1","message":{"role":"user","content":"<command-name>/clear</command-name>"}}
 `
 
+// A Codex rollout in miniature. Every record shares the {timestamp, type,
+// payload} envelope, the conversation is carried on the event_msg channel, and
+// the response_item channel repeats it with the harness preamble prepended —
+// which is exactly what must not be indexed.
+const codexSession = `{"timestamp":"2026-06-09T19:25:07.702Z","type":"session_meta","payload":{"id":"S9","timestamp":"2026-06-09T19:24:52.635Z","cwd":"/Users/joe/git/gx","originator":"Codex Desktop"}}
+{"timestamp":"2026-06-09T19:25:07.716Z","type":"event_msg","payload":{"type":"task_started","turn_id":"t1"}}
+{"timestamp":"2026-06-09T19:25:07.719Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"# AGENTS.md instructions\nnever index me"}]}}
+{"timestamp":"2026-06-09T19:25:08.000Z","type":"event_msg","payload":{"type":"user_message","client_id":"c1","message":"what hotel did we stay at in Mexico"}}
+{"timestamp":"2026-06-09T19:25:20.000Z","type":"event_msg","payload":{"type":"agent_message","message":"You stayed at Hotel Esencia in Tulum.","phase":"commentary"}}
+{"timestamp":"2026-06-09T19:25:21.000Z","type":"response_item","payload":{"type":"function_call","name":"shell","arguments":"{}"}}
+{"timestamp":"2026-06-09T19:25:22.000Z","type":"event_msg","payload":{"type":"token_count","total":123}}
+`
+
 // writeZip builds a zip from a name -> content map and returns its path.
 func writeZip(t *testing.T, name string, files map[string]string) string {
 	t.Helper()
@@ -122,6 +135,9 @@ func TestDetectFormats(t *testing.T) {
 		{"chatgpt export", map[string]string{"conversations.json": chatgptExport, "chat.html": "<html>"}, formatChatGPT},
 		{"claude export", map[string]string{"conversations.json": claudeExport, "users.json": "[]"}, formatClaude},
 		{"claude code transcripts", map[string]string{"projects/repo/S1.jsonl": claudeCodeSession}, formatClaudeCode},
+		// Both agent formats are directories of JSONL, so the sniffers have to
+		// tell them apart rather than settle for "looks like a transcript".
+		{"codex transcripts", map[string]string{"sessions/rollout-S9.jsonl": codexSession}, formatCodex},
 		{"plain files", map[string]string{"notes/a.md": "# hello", "notes/b.txt": "world"}, formatFiles},
 		{"nested export still found", map[string]string{"export-2026/conversations.json": claudeExport}, formatClaude},
 	}
@@ -292,6 +308,76 @@ func TestImportClaudeCode(t *testing.T) {
 	}
 	if got := recs[3].attr("role"); got != "assistant/subagent" {
 		t.Errorf("sidechain role: %q", got)
+	}
+}
+
+func TestImportCodex(t *testing.T) {
+	recs := collect(t, writeZip(t, "codex.zip", map[string]string{
+		"sessions/rollout-2026-06-09T14-24-52-S9.jsonl": codexSession,
+	}), formatAuto, perTurn)
+
+	if len(recs) != 2 {
+		t.Fatalf("got %d documents, want 2 (one user, one assistant): %+v", len(recs), recs)
+	}
+	// session_meta wins over the filename, so a renamed rollout still updates
+	// the documents it wrote last time instead of duplicating them.
+	if recs[0].ID != "codex:S9:line4" {
+		t.Errorf("document id: %q", recs[0].ID)
+	}
+	if got := recs[0].attr("source"); got != formatCodex {
+		t.Errorf("source attribute: %q", got)
+	}
+	if got := recs[0].attr("role"); got != "user" {
+		t.Errorf("first document role: %q", got)
+	}
+	if got := recs[1].attr("role"); got != "assistant" {
+		t.Errorf("second document role: %q", got)
+	}
+	if got := recs[0].attr("cwd"); got != "/Users/joe/git/gx" {
+		t.Errorf("cwd attribute: %q", got)
+	}
+	if got := recs[0].attr("project"); got != "gx" {
+		t.Errorf("project attribute: %q", got)
+	}
+	// A rollout names nothing, so the first thing asked has to serve as the label.
+	if got := recs[0].attr("title"); got != "what hotel did we stay at in Mexico" {
+		t.Errorf("title should come from the first user message, got %q", got)
+	}
+	if got := recs[0].attr("created"); got != "2026-06-09T19:25:08Z" {
+		t.Errorf("created attribute: %q", got)
+	}
+	for _, r := range recs {
+		if strings.Contains(r.Text, "AGENTS.md") || strings.Contains(r.Text, "never index me") {
+			t.Errorf("the response_item preamble was indexed: %q", r.Text)
+		}
+		if strings.Contains(r.Text, "token_count") || strings.Contains(r.Text, "shell") {
+			t.Errorf("telemetry was indexed: %q", r.Text)
+		}
+	}
+}
+
+// ~/.codex holds history.jsonl and session_index.jsonl next to the rollouts.
+// They share the extension and nothing else, and pointing at the directory
+// must not turn them into an error or into documents.
+func TestImportCodexIgnoresNonRollouts(t *testing.T) {
+	dir := t.TempDir()
+	for name, body := range map[string]string{
+		"rollout-S9.jsonl":    codexSession,
+		"history.jsonl":       `{"session_id":"S9","ts":1781033107,"text":"ls -la"}` + "\n",
+		"session_index.jsonl": `{"id":"S9","path":"/tmp/rollout-S9.jsonl"}` + "\n",
+	} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	recs := collect(t, dir, formatCodex, perTurn)
+	if len(recs) != 2 {
+		t.Fatalf("got %d documents, want only the rollout's 2: %+v", len(recs), recs)
+	}
+	for _, r := range recs {
+		if strings.Contains(r.Text, "ls -la") {
+			t.Errorf("history.jsonl was indexed: %q", r.Text)
+		}
 	}
 }
 
@@ -501,4 +587,73 @@ func decodeImportResult(t *testing.T, out string) map[string]any {
 		t.Fatalf("import --json output did not parse: %v\noutput: %s", err, out)
 	}
 	return res
+}
+
+// The site's two commands, run for real: add a source without naming a
+// namespace, then ask a question without naming one, and get the answer back.
+// If these ever diverge, the demo on the front page searches an empty index.
+func TestAddAndSearchDefaultNamespace(t *testing.T) {
+	cache := putTestCache(t)
+	t.Setenv("TENNIS_CACHE", cache)
+	t.Setenv("TENNIS_NS", "")
+	dbPath := filepath.Join(t.TempDir(), "add.sqlite")
+
+	archivePath := writeZip(t, "codex.zip", map[string]string{
+		"sessions/rollout-S9.jsonl": codexSession,
+	})
+
+	out, err := captureStdout(t, func() error {
+		return cmdAdd([]string{"--db", dbPath, "--json", "--codex", archivePath})
+	})
+	if err != nil {
+		t.Fatalf("add: %v\noutput: %s", err, out)
+	}
+	res := decodeImportResult(t, out)
+	if res["written"] != float64(2) {
+		t.Fatalf("add: want written=2, got %v", res)
+	}
+	sources, _ := res["sources"].([]any)
+	if len(sources) != 1 {
+		t.Fatalf("sources: %v", res["sources"])
+	}
+	if src := sources[0].(map[string]any); src["format"] != formatCodex {
+		t.Errorf("--codex should select the codex format, got %v", src["format"])
+	}
+
+	out, err = captureStdout(t, func() error {
+		return cmdSearch([]string{"--db", dbPath, "--json", "what hotel did we stay at in Mexico"})
+	})
+	if err != nil {
+		t.Fatalf("search: %v\noutput: %s", err, out)
+	}
+	var results []map[string]any
+	if err := json.Unmarshal([]byte(out), &results); err != nil {
+		t.Fatalf("search --json did not parse: %v\noutput: %s", err, out)
+	}
+	if len(results) == 0 {
+		t.Fatal("search found nothing in the namespace add just wrote to")
+	}
+	attrs, ok := results[0]["attributes"].(map[string]any)
+	if !ok || attrs["source"] != formatCodex {
+		t.Errorf("top hit did not come from the added session: %v", results[0])
+	}
+}
+
+// Two source flags is a question with no right answer, and picking one would
+// import the archive as the wrong thing. It has to fail before the namespace
+// is created, or a typo leaves an empty namespace bound to an embedder.
+func TestAddRejectsConflictingSources(t *testing.T) {
+	err := cmdAdd([]string{"--codex", "--chatgpt", "/nonexistent"})
+	if err == nil {
+		t.Fatal("two source flags should be an error")
+	}
+	if !strings.Contains(err.Error(), "pick one") {
+		t.Errorf("error should say what to do about it, got %q", err)
+	}
+	if err := cmdAdd([]string{"--codex", "--format", "files", "/nonexistent"}); err == nil {
+		t.Error("a source flag contradicting --format should be an error")
+	}
+	if err := cmdAdd([]string{"--codex"}); err == nil {
+		t.Error("add with no path should be a usage error")
+	}
 }

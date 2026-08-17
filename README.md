@@ -15,8 +15,8 @@ For the database-inclined: this is the sqlite-vec idea — vectors living in a S
 - **Won't lie to you.** If something changes that would make results silently wrong, it stops and tells you instead.
 
 ```bash
-tennis seed notes ~/Documents/notes
-tennis match notes "keep me signed in"
+tennis add ~/Documents/notes
+tennis search "keep me signed in"
 ```
 
 ---
@@ -51,92 +51,104 @@ On first use it downloads the embedding model once (~123MB) to `~/.cache/tennis`
 
 ```bash
 # index a directory (creates the namespace on first run)
-$ tennis seed notes ~/Documents/notes
-tennis: created namespace "notes" bound to builtin:potion-retrieval-32M
-seeded 3, skipped 0 unchanged, 3 chunks in "notes"
+$ tennis add ~/Documents/notes
+tennis: created namespace "context" bound to builtin:potion-retrieval-32M
+tennis: ~/Documents/notes: reading plain files
+imported 3, skipped 0 unchanged, 3 chunks in "context"
 
 # search it
-$ tennis match notes "keep me signed in"
- 1. auth.md                      0.0164  [sem#1]
-    # Session handling Make the login flow remember the user between sessions…
- 2. retry.md                     0.0161  [sem#2]
-    # HTTP client Add retry with exponential backoff to the HTTP client…
+$ tennis search "keep me signed in"
+> # Session handling Make the login flow remember the user between sessions. The session cookie is se…
+  auth.md [2026-08-10] 0.0328
+
+ 2. config.md [2026-08-10] 0.0161  [sem#2]
+    # Configuration Write a parser for TOML configuration files. Values from the file are merged over t…
 
 # an exact term both rankers agree on scores higher
-$ tennis match notes "TOML"
- 1. config.md                    0.0328  [kw#1 sem#1]
-    # Configuration Write a parser for TOML configuration files…
+$ tennis search "TOML"
+> # Configuration Write a parser for TOML configuration files. Values from the file are merged over t…
+  config.md [2026-08-10] 0.0328
 
 # re-indexing is nearly free: unchanged files are never re-embedded
-$ tennis seed notes ~/Documents/notes
-seeded 0, skipped 3 unchanged, 0 chunks in "notes"
+$ tennis add ~/Documents/notes
+imported 0, skipped 3 unchanged, 0 chunks in "context"
 ```
 
-The `[kw#1 sem#1]` tag shows which ranker found each result and where. A hit only one ranker surfaced is a different kind of answer than one both agreed on, and tennis shows you which you got.
+The best hit is printed as the answer — the words, then where they came from and when. Below it, the runners-up keep the ranked-list shape, because comparing them is the point. The `[kw#1 sem#1]` tag shows which ranker found each one and where: a hit only one ranker surfaced is a different kind of answer than one both agreed on, and tennis shows you which you got.
 
-Nothing to index yet? Start with the history you already have — point [`import`](#import--index-a-chat-export) at a Claude or ChatGPT export zip, or at `~/.claude/projects`, and search it in one command.
+Neither command named a namespace, so both used `context`, the default. That is the whole story until you want to keep separate things separate; then `--ns work` on either command, or `$TENNIS_NS`, does it.
+
+Nothing to index yet? Start with the history you already have — point [`add`](#add--index-sessions-or-files) at a ChatGPT or Claude export zip, or at `~/.claude` or `~/.codex`, and search it in one command.
 
 ---
 
 ## CLI
 
-### `seed` — index files
+### `add` — index sessions or files
+
+`add` is the one way in. Point it at an export archive, a directory of local agent transcripts, or a pile of files, and it works out what it was handed:
 
 ```bash
-tennis seed notes ./docs                      # index a directory tree
-tennis seed notes ./a.md ./b.md               # index specific files
-tennis seed code ./src --ext .go,.ts,.rs      # pick extensions (default .md,.txt)
-tennis seed notes ./docs --chunk 2000         # bigger chunks for a new namespace
-tennis seed notes ./docs --json               # machine-readable
+tennis add ~/Downloads/chatgpt-export.zip     # a ChatGPT data export
+tennis add ~/Downloads/claude-export.zip      # a Claude data export
+tennis add ~/.claude                          # local Claude Code sessions
+tennis add ~/.codex                           # local Codex sessions
+tennis add ./docs                             # a directory tree of files
+tennis add ./a.md ./b.md                      # specific files
 ```
 
-Re-running `seed` is an incremental update. Files whose contents and metadata are byte-identical to what is stored are skipped entirely — not re-read into the model, not re-indexed. This is why re-seeding a large corpus after editing one file takes about as long as indexing one file.
-
-`seed` also refuses two kinds of junk, with a note on stderr: files containing binary content (a PDF's raw bytes would index without erroring and quietly pollute every future ranking), and files over 10MB (at that size it's a log or a dataset, not prose). Binary detection is a NUL-byte check in the leading 8KB, the same heuristic git uses; a binary file shorter than that window with no NUL byte in it can slip through and get indexed.
-
-### `import` — index a chat export
-
-The fastest way to have something worth searching on day one is the history you already have. `import` takes an export archive and turns it into documents:
+Detection reads the source rather than the filename: the ChatGPT and Claude exports are told apart by the shape of their `conversations.json`, and the two agent transcript formats by the fields on each line of their `.jsonl` — Claude Code writes a `uuid` and `sessionId`, Codex wraps everything in a `{timestamp, type, payload}` envelope. When the guess is wrong, or you would rather be explicit, name the source:
 
 ```bash
-tennis import history ~/Downloads/claude-export.zip     # a Claude data export
-tennis import history ~/Downloads/chatgpt-export.zip    # a ChatGPT data export
-tennis import agents ~/.claude/projects                 # local Claude Code sessions
-tennis import notes ~/Downloads/notes.zip               # a zip that's just files
+tennis add --chatgpt ~/Downloads/export.zip
+tennis add --claude ~/Downloads/export.zip
+tennis add --claude-code ~/.claude
+tennis add --codex ~/.codex
+tennis add --files ~/Documents/notes
 ```
 
-It accepts a `.zip`, an already-unzipped directory, or a single transcript, and works out what it was handed by looking inside — the ChatGPT and Claude exports are told apart by the shape of their `conversations.json`, and a directory of `.jsonl` session transcripts by the fields on the first line. Pass `--format chatgpt|claude|claude-code|files` to say so outright when the guess is wrong.
+A `.zip`, an already-unzipped directory, and a single transcript are all acceptable. Other useful flags:
 
-This exists because the alternative doesn't cover the past. Capturing conversations live — pointing a client at a proxy or a custom base URL — only ever sees traffic from the moment it is configured. Everything before that is in the export archive and nowhere else, so that archive is the thing tennis reads.
+```bash
+tennis add ./src --files --ext .go,.ts,.rs    # pick extensions (default .md,.txt)
+tennis add ./docs --chunk 2000                # bigger chunks for a new namespace
+tennis add ~/.codex --ns work                 # a namespace other than the default
+tennis add ./docs --json                      # machine-readable
+```
+
+Importing history exists because the alternative doesn't cover the past. Capturing conversations live — pointing a client at a proxy or a custom base URL — only ever sees traffic from the moment it is configured. For ChatGPT and claude.ai, everything before that is in the export archive and nowhere else, so that archive is the thing tennis reads. Claude Code and Codex are kinder: they keep their transcripts on your disk already, under `~/.claude` and `~/.codex`, and tennis reads them where they sit.
 
 By default each message becomes its own document, which is the unit you tend to remember; `--per conversation` makes each thread one document instead, for when the thread matters more than the line.
 
 ```bash
-$ tennis import history ~/Downloads/claude-export.zip
-tennis: created namespace "history" bound to builtin:potion-retrieval-32M
+$ tennis add ~/Downloads/claude-export.zip
+tennis: created namespace "context" bound to builtin:potion-retrieval-32M
 tennis: ~/Downloads/claude-export.zip: reading a Claude export (conversations.json, projects.json)
 tennis: 5000 documents in…
-imported 11423, skipped 0 unchanged, 14106 chunks in "history"
+imported 11423, skipped 0 unchanged, 14106 chunks in "context"
 
-$ tennis match history "that thing about session cookies"
- 1. Keeping users signed in       0.0328  [kw#1 sem#1]
-    a session cookie with a refresh token is the usual shape…
+$ tennis search "that thing about session cookies"
+> a session cookie with a refresh token is the usual shape…
+  Claude [2025-03-15] 0.0328
 ```
 
 Every document carries the attributes needed to find its way home — `source`, `session`, `role`, `title`, `created`, and for local sessions `project`, `cwd` and `branch` — so a search can be narrowed the same way any other namespace can:
 
 ```bash
-tennis match history "retry logic" --where role=user
-tennis match agents "flaky test" --where project=tennis,branch=main
+tennis search "retry logic" --where role=user
+tennis search "flaky test" --where project=tennis,branch=main
+tennis search "the timeout" --where source=codex
 ```
 
-Re-importing the same archive is free. IDs are built from the export's own conversation and message IDs, so a fresh export months later writes only what is new and skips everything already indexed.
+Re-running `add` is an incremental update, and re-adding the same source is free. File documents are keyed by path and skipped when contents and metadata are byte-identical to what is stored — not re-read into the model, not re-indexed — which is why re-adding a large corpus after editing one file takes about as long as indexing one file. Session documents are keyed by the export's own conversation and message IDs, so a fresh export months later writes only what is new.
 
-Two things are deliberately left out. Local session transcripts are indexed from their text and thinking, not their tool calls and tool results — those are mostly whole file reads and command output, and letting them in would mean every search ranked file contents above what was said about them. ChatGPT messages the exporter marked as hidden are skipped for the same reason: they were never on screen.
+`add` refuses two kinds of junk when reading plain files, with a note on stderr: files containing binary content (a PDF's raw bytes would index without erroring and quietly pollute every future ranking), and files over 10MB (at that size it's a log or a dataset, not prose). Binary detection is a NUL-byte check in the leading 8KB, the same heuristic git uses; a binary file shorter than that window with no NUL byte in it can slip through and get indexed.
+
+Two things are deliberately left out of session imports. Local transcripts are indexed from their text and thinking, not their tool calls and tool results — those are mostly whole file reads and command output, and letting them in would mean every search ranked file contents above what was said about them. A Codex rollout records each exchange twice, once as raw model traffic carrying the harness preamble and once as the events the interface showed; tennis reads the second, because what you remember saying is what you typed. ChatGPT messages the exporter marked as hidden are skipped for the same reason: they were never on screen.
 
 ### `put` — ingest documents that aren't files
 
-`seed` walks a directory; `put` is for content that never touched disk — event lines, chat turns, agent claims, anything a program produces rather than a file. It reads newline-delimited JSON from stdin, one document per line:
+`add` walks a directory; `put` is for content that never touched disk — event lines, chat turns, agent claims, anything a program produces rather than a file. It reads newline-delimited JSON from stdin, one document per line:
 
 ```bash
 echo '{"id": "e1", "text": "deploy failed with a connection timeout", "attributes": {"kind": "event", "session": "s1"}}' \
@@ -147,7 +159,7 @@ tennis put agents --openai text-embedding-3-small < events.ndjson
 tennis put agents --json < events.ndjson               # machine-readable
 ```
 
-Each line is `{"id": "...", "text": "...", "attributes": {...}}` — `attributes` is optional, everything else follows `seed`: the namespace is created on first use bound to the builtin model (or `--openai <model>`), and a document whose text and attributes are byte-identical to what's stored is skipped rather than re-embedded.
+Each line is `{"id": "...", "text": "...", "attributes": {...}}` — `attributes` is optional, everything else follows `add`: the namespace is created on first use bound to the builtin model (or `--openai <model>`), and a document whose text and attributes are byte-identical to what's stored is skipped rather than re-embedded.
 
 A line that isn't valid JSON, or is missing `id` or `text`, is reported to stderr with its line number and does not stop the batch; `put` exits nonzero if any line failed.
 
@@ -157,16 +169,17 @@ tennis: put: line 14: missing "id"
 {"written": 40, "skipped": 3, "chunks": 51, "failed": 1}
 ```
 
-### `match` — search
+### `search` — search
 
 ```bash
-tennis match notes "exponential backoff"
-tennis match notes "keep me signed in" -n 5           # top 5
-tennis match notes "retry" --mode keyword             # BM25 only
-tennis match notes "retry" --mode semantic            # vectors only
-tennis match notes "auth" --where 'status=merged'     # filter by attribute
-tennis match notes "auth" --where 'cost>5,status!=failed'
-tennis match notes "auth" --json                      # full results with scores and attributes
+tennis search "exponential backoff"
+tennis search "keep me signed in" -n 5             # top 5
+tennis search "retry" --mode keyword               # BM25 only
+tennis search "retry" --mode semantic              # vectors only
+tennis search "auth" --where 'status=merged'       # filter by attribute
+tennis search "auth" --where 'cost>5,status!=failed'
+tennis search "auth" --ns work                     # a namespace other than the default
+tennis search "auth" --json                        # full results with scores and attributes
 ```
 
 `--json` output includes each hit's stored `attributes`, not just its text and score:
@@ -215,12 +228,25 @@ tennis serve                                   # local HTTP API on 127.0.0.1:881
 | Flag | Meaning |
 |---|---|
 | `--db <path>` | database file (default `~/.tennis/db.sqlite`, or `$TENNIS_DB`) |
+| `--ns <name>` | namespace for `add` and `search` (default `context`, or `$TENNIS_NS`) |
 | `--json` | machine-readable output on stdout; progress goes to stderr |
-| `-n <k>` | how many results (`match` only) |
+| `-n <k>` | how many results (`search` only) |
 | `--mode` | `hybrid` (default), `keyword`, `semantic` |
 | `--where` | attribute filter: `key=value`, `key>value`, `key!=value`, comma-separated |
-| `--format` | override export detection (`import` only): `chatgpt`, `claude`, `claude-code`, `files` |
-| `--per` | document granularity (`import` only): `turn` (default) or `conversation` |
+| `--format` | override source detection (`add` only): `chatgpt`, `claude`, `claude-code`, `codex`, `files` |
+| `--per` | document granularity (`add` only): `turn` (default) or `conversation` |
+
+### Naming the namespace positionally
+
+`add` and `search` take the namespace as a flag so that the common case needs no namespace at all. Three older commands take it as the first argument instead, and still work:
+
+```bash
+tennis seed notes ./docs                       # like tennis add --files ./docs --ns notes
+tennis import history ~/Downloads/export.zip   # like tennis add ~/Downloads/export.zip --ns history
+tennis match notes "keep me signed in"         # like tennis search "keep me signed in" --ns notes
+```
+
+`put`, `get`, and `rm` name the namespace positionally too.
 
 ---
 
@@ -463,7 +489,7 @@ loaded embedder is openai:text-embedding-3-small (1536 dims); reindex the
 namespace or restore the original model
 ```
 
-To change models, create a new namespace and re-seed. That is a real cost, and it is meant to be — it makes the expensive operation visible instead of letting it happen by accident.
+To change models, create a new namespace and re-index it. That is a real cost, and it is meant to be — it makes the expensive operation visible instead of letting it happen by accident.
 
 ---
 
