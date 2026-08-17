@@ -1,0 +1,49 @@
+:root {
+  --surface: #fff;
+  --panel: #f4f3f2;
+  --carbon: #000;
+  --muted: #767676;
+  /* icons and the shell prompt: present, never competing with the command */
+  --faint: #8a8a8a;
+  --rule: #c8c8c8;
+}
+
+html {
+  box-sizing: border-box;
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: inherit;
+}
+
+html,
+body {
+  width: 100%;
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  background-color: var(--surface);
+  color: var(--carbon);
+  font-family: var(--font-geist), system-ui, sans-serif;
+  font-size: 14px;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+a {
+  color: var(--carbon);
+}
+
+::selection {
+  background-color: var(--carbon);
+  color: var(--surface);
+}
+
+:focus-visible {
+  outline: 1px solid var(--carbon);
+  outline-offset: 3px;
+}
