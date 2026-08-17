@@ -35,6 +35,7 @@ USAGE
 COMMANDS
   add <path...>                index sessions or files
   search <query>               search
+  ls [source]                  list what tennis has, newest first
   put <namespace>              ingest NDJSON documents from stdin
   get <namespace> <id>         print one document
   rm <namespace> <id...>       delete documents
@@ -75,6 +76,8 @@ func main() {
 	switch cmd {
 	case "add":
 		err = cmdAdd(args)
+	case "ls":
+		err = cmdLS(args)
 	case "search":
 		err = cmdSearch(args)
 	case "seed":
@@ -776,14 +779,18 @@ func displayID(r tennis.Result) string {
 	return r.ID
 }
 
+// truncate cuts to n runes, not n bytes. A title carrying an em-dash or any
+// CJK text would otherwise be sliced mid-character, and the column would print
+// a replacement glyph where the ellipsis should be.
 func truncate(s string, n int) string {
-	if len(s) <= n {
+	r := []rune(s)
+	if len(r) <= n {
 		return s
 	}
 	if n <= 1 {
-		return s[:n]
+		return string(r[:n])
 	}
-	return s[:n-1] + "…"
+	return string(r[:n-1]) + "…"
 }
 
 func emit(v any) error {

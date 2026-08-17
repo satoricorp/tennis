@@ -195,6 +195,234 @@ func (n *Namespace) Delete(ctx context.Context, ids []string) (int, error) {
 	return deleted, nil
 }
 
+// DocumentInfo is a document's metadata without its text — what you need to
+// see what a namespace holds, without dragging every transcript through memory
+// to find out.
+type DocumentInfo struct {
+	ID         string         `json:"id"`
+	Attributes map[string]any `json:"attributes,omitempty"`
+	Chars      int            `json:"chars"`
+	Chunks     int            `json:"chunks"`
+}
+
+// GroupInfo is one value of a grouping attribute and what sits under it.
+// Attributes carries the fields that are constant within the group — a title
+// and a source do not vary between the turns of one conversation.
+type GroupInfo struct {
+	Key        string         `json:"key"`
+	Documents  int            `json:"documents"`
+	Chunks     int            `json:"chunks"`
+	Attributes map[string]any `json:"attributes,omitempty"`
+}
+
+// ListOptions narrows and orders a listing.
+type ListOptions struct {
+	Filter Filter // optional attribute filter, same as Query
+	Limit  int    // default 50; a negative value means no limit
+	Offset int
+
+	// SortBy names an attribute to order by. Values are compared as SQLite
+	// compares them, so an attribute holding RFC3339 timestamps orders
+	// chronologically and one holding free text orders lexically.
+	SortBy string
+	Asc    bool
+}
+
+// List returns document metadata, newest first.
+//
+// Text is deliberately not returned. A large namespace is tens of megabytes of
+// transcript, and none of it is needed to answer "what is in here" — the point
+// of this call is that it stays cheap as the corpus grows, which the scan
+// behind Query does not.
+func (n *Namespace) List(ctx context.Context, opts ListOptions) ([]DocumentInfo, error) {
+	sortPath, limit, err := listPlan(&opts, "created")
+	if err != nil {
+		return nil, err
+	}
+	where, args, err := listFilter(n.name, opts.Filter)
+	if err != nil {
+		return nil, err
+	}
+	args = append(args, limit, opts.Offset)
+
+	rows, err := n.db.sql.QueryContext(ctx, `
+		SELECT d.id, d.attrs, LENGTH(d.text),
+		       (SELECT COUNT(*) FROM chunks c WHERE c.ns = d.ns AND c.doc_id = d.id)
+		FROM docs d
+		WHERE d.ns = ?`+where+`
+		ORDER BY (`+sortPath+` IS NULL), `+sortPath+` `+listDirection(opts)+`, d.id
+		LIMIT ? OFFSET ?`, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []DocumentInfo
+	for rows.Next() {
+		var info DocumentInfo
+		var attrs string
+		if err := rows.Scan(&info.ID, &attrs, &info.Chars, &info.Chunks); err != nil {
+			return nil, err
+		}
+		if err := decodeAttrs(attrs, &info.Attributes); err != nil {
+			return nil, err
+		}
+		out = append(out, info)
+	}
+	return out, rows.Err()
+}
+
+// Groups collapses documents by an attribute — most usefully the one that ties
+// a conversation's turns together.
+//
+// A namespace imported at turn granularity holds one document per message, and
+// listing those answers a question nobody asked: thirty thousand rows where the
+// user wanted to know which conversations they have. Grouping is what makes a
+// listing readable at that granularity.
+//
+// The extra fields are aggregated with MIN, which is exact rather than
+// arbitrary for values that do not vary within a group — which is the case for
+// every attribute carried here.
+func (n *Namespace) Groups(ctx context.Context, attr string, opts ListOptions, extra ...string) ([]GroupInfo, error) {
+	groupPath, err := attrPath(attr)
+	if err != nil {
+		return nil, err
+	}
+	sortPath, limit, err := listPlan(&opts, "created")
+	if err != nil {
+		return nil, err
+	}
+	where, args, err := listFilter(n.name, opts.Filter)
+	if err != nil {
+		return nil, err
+	}
+	args = append(args, limit, opts.Offset)
+
+	selects := ""
+	for _, key := range extra {
+		path, err := attrPath(key)
+		if err != nil {
+			return nil, err
+		}
+		selects += ", MIN(" + path + ")"
+	}
+
+	rows, err := n.db.sql.QueryContext(ctx, `
+		SELECT `+groupPath+` AS grp, COUNT(*),
+		       SUM((SELECT COUNT(*) FROM chunks c WHERE c.ns = d.ns AND c.doc_id = d.id)),
+		       MAX(`+sortPath+`)`+selects+`
+		FROM docs d
+		WHERE d.ns = ? AND `+groupPath+` IS NOT NULL`+where+`
+		GROUP BY grp
+		ORDER BY MAX(`+sortPath+`) `+listDirection(opts)+`, grp
+		LIMIT ? OFFSET ?`, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []GroupInfo
+	for rows.Next() {
+		var (
+			g      GroupInfo
+			sortAt any
+			vals   = make([]any, len(extra))
+		)
+		dest := []any{&g.Key, &g.Documents, &g.Chunks, &sortAt}
+		for i := range vals {
+			dest = append(dest, &vals[i])
+		}
+		if err := rows.Scan(dest...); err != nil {
+			return nil, err
+		}
+		g.Attributes = map[string]any{}
+		if sortAt != nil {
+			g.Attributes[opts.SortBy] = sortAt
+		}
+		for i, key := range extra {
+			if vals[i] != nil {
+				g.Attributes[key] = vals[i]
+			}
+		}
+		out = append(out, g)
+	}
+	return out, rows.Err()
+}
+
+// Count reports how many documents match a filter, without reading any of them.
+func (n *Namespace) Count(ctx context.Context, filter Filter) (int, error) {
+	where, args, err := listFilter(n.name, filter)
+	if err != nil {
+		return 0, err
+	}
+	var count int
+	err = n.db.sql.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM docs d WHERE d.ns = ?`+where, args...).Scan(&count)
+	return count, err
+}
+
+// CountGroups reports how many distinct values of an attribute are present.
+func (n *Namespace) CountGroups(ctx context.Context, attr string, filter Filter) (int, error) {
+	path, err := attrPath(attr)
+	if err != nil {
+		return 0, err
+	}
+	where, args, err := listFilter(n.name, filter)
+	if err != nil {
+		return 0, err
+	}
+	var count int
+	err = n.db.sql.QueryRowContext(ctx,
+		`SELECT COUNT(DISTINCT `+path+`) FROM docs d WHERE d.ns = ? AND `+path+` IS NOT NULL`+where,
+		args...).Scan(&count)
+	return count, err
+}
+
+func listPlan(opts *ListOptions, defaultSort string) (sortPath string, limit int, err error) {
+	if opts.SortBy == "" {
+		opts.SortBy = defaultSort
+	}
+	limit = opts.Limit
+	switch {
+	case limit == 0:
+		limit = 50
+	case limit < 0:
+		limit = -1 // SQLite reads a negative LIMIT as unbounded
+	}
+	sortPath, err = attrPath(opts.SortBy)
+	return sortPath, limit, err
+}
+
+func listFilter(ns string, f Filter) (string, []any, error) {
+	args := []any{ns}
+	if f == nil {
+		return "", args, nil
+	}
+	clause, filterArgs, err := f.clause()
+	if err != nil {
+		return "", nil, err
+	}
+	return " AND " + clause, append(args, filterArgs...), nil
+}
+
+// listDirection puts documents missing the sort attribute last in either
+// direction rather than clustering them at the top: a plain file has no
+// created date, and a listing that opened with every file would bury what the
+// user was looking for.
+func listDirection(opts ListOptions) string {
+	if opts.Asc {
+		return "ASC"
+	}
+	return "DESC"
+}
+
+func decodeAttrs(raw string, into *map[string]any) error {
+	if raw == "" || raw == "{}" {
+		return nil
+	}
+	return json.Unmarshal([]byte(raw), into)
+}
+
 // Get returns a single document.
 func (n *Namespace) Get(ctx context.Context, id string) (*Document, error) {
 	var text, attrs string

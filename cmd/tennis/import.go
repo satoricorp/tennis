@@ -123,6 +123,8 @@ type importOpts struct {
 	model       string
 	openaiModel string
 	chunkSize   int
+	noCards     bool
+	cardDir     string
 }
 
 func registerImportFlags(fs_ *flag.FlagSet, o *importOpts) {
@@ -134,6 +136,8 @@ func registerImportFlags(fs_ *flag.FlagSet, o *importOpts) {
 	fs_.StringVar(&o.model, "model", "", "built-in model for a new namespace (default "+embed.DefaultModel+")")
 	fs_.StringVar(&o.openaiModel, "openai", "", "use an OpenAI model instead of the built-in one (requires OPENAI_API_KEY)")
 	fs_.IntVar(&o.chunkSize, "chunk", 0, "chunk size in characters for a new namespace")
+	fs_.BoolVar(&o.noCards, "no-cards", false, "skip the readable markdown summaries")
+	fs_.StringVar(&o.cardDir, "cards", DefaultCardDir, "where summary cards are written")
 }
 
 func runImport(nsName string, paths []string, o importOpts) error {
@@ -182,6 +186,14 @@ func runImport(nsName string, paths []string, o importOpts) error {
 	}
 
 	sink := &docSink{ctx: ctx, ns: ns}
+	if !o.noCards {
+		cards, err := newCardWriter(ctx, o.cardDir, newSummarizer(*asJSON))
+		if err != nil {
+			return err
+		}
+		sink.cards = cards
+		defer cards.close()
+	}
 	if !*asJSON {
 		sink.progress = func(done int) { fmt.Fprintf(os.Stderr, "tennis: %d documents in…\n", done) }
 	}
@@ -202,18 +214,27 @@ func runImport(nsName string, paths []string, o importOpts) error {
 	if err := sink.flush(); err != nil {
 		return err
 	}
+	sink.cards.close()
 
 	if *asJSON {
-		if err := emit(map[string]any{
+		out := map[string]any{
 			"sources": reports,
 			"written": sink.res.Written, "skipped": sink.res.Skipped,
 			"chunks": sink.res.Chunks, "failed": failed,
-		}); err != nil {
+		}
+		if sink.cards != nil {
+			out["cards"] = sink.cards.written
+			out["cards_unsummarized"] = sink.cards.failed
+		}
+		if err := emit(out); err != nil {
 			return err
 		}
 	} else {
 		fmt.Printf("imported %d, skipped %d unchanged, %d chunks in %q",
 			sink.res.Written, sink.res.Skipped, sink.res.Chunks, nsName)
+		if sink.cards != nil && sink.cards.written > 0 {
+			fmt.Printf(", %d cards in %s", sink.cards.written, sink.cards.dir)
+		}
 		if failed > 0 {
 			fmt.Printf(" (%d failed)", failed)
 		}
@@ -707,6 +728,11 @@ type docSink struct {
 	// business downloading a 123MB model to find out.
 	capture  func(id, text string, attrs map[string]any)
 	captured int
+
+	// cards, when set, receives each conversation once — independent of
+	// granularity, since a card describes the conversation rather than the
+	// documents it was split into.
+	cards *cardWriter
 }
 
 const (
@@ -784,6 +810,7 @@ func (c conversation) emit(per string, sink *docSink) error {
 	if len(c.turns) == 0 {
 		return nil
 	}
+	sink.cards.add(c)
 	if per == perConversation {
 		var b strings.Builder
 		if c.title != "" {
