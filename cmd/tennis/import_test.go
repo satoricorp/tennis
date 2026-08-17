@@ -514,6 +514,7 @@ func TestNormalizeTime(t *testing.T) {
 func TestImportEndToEnd(t *testing.T) {
 	cache := putTestCache(t)
 	t.Setenv("TENNIS_CACHE", cache)
+	t.Setenv("TENNIS_CARDS", t.TempDir())
 	dbPath := filepath.Join(t.TempDir(), "import.sqlite")
 	const ns = "history"
 
@@ -602,6 +603,7 @@ func decodeImportResult(t *testing.T, out string) map[string]any {
 func TestAddAndSearchDefaultNamespace(t *testing.T) {
 	cache := putTestCache(t)
 	t.Setenv("TENNIS_CACHE", cache)
+	t.Setenv("TENNIS_CARDS", t.TempDir())
 	t.Setenv("TENNIS_NS", "")
 	dbPath := filepath.Join(t.TempDir(), "add.sqlite")
 

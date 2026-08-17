@@ -196,6 +196,7 @@ func captureStdout(t *testing.T, fn func() error) (string, error) {
 func TestPutEndToEnd(t *testing.T) {
 	cache := putTestCache(t)
 	t.Setenv("TENNIS_CACHE", cache)
+	t.Setenv("TENNIS_CARDS", t.TempDir())
 	dbPath := filepath.Join(t.TempDir(), "put.sqlite")
 	const ns = "agents"
 

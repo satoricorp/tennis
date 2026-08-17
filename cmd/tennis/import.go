@@ -137,7 +137,7 @@ func registerImportFlags(fs_ *flag.FlagSet, o *importOpts) {
 	fs_.StringVar(&o.openaiModel, "openai", "", "use an OpenAI model instead of the built-in one (requires OPENAI_API_KEY)")
 	fs_.IntVar(&o.chunkSize, "chunk", 0, "chunk size in characters for a new namespace")
 	fs_.BoolVar(&o.noCards, "no-cards", false, "skip the readable markdown summaries")
-	fs_.StringVar(&o.cardDir, "cards", DefaultCardDir, "where summary cards are written")
+	fs_.StringVar(&o.cardDir, "cards", defaultCardDir(), "where summary cards are written")
 }
 
 func runImport(nsName string, paths []string, o importOpts) error {

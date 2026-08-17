@@ -53,6 +53,7 @@ SOURCES
 
 COMMON FLAGS
   --db <path>    database file (default ~/.tennis/db.sqlite, or $TENNIS_DB)
+  --cards <dir>  where summary cards are written (default ~/tennis, or $TENNIS_CARDS)
   --ns <name>    namespace for add and search (default ` + defaultNamespace + `, or $TENNIS_NS)
   --json         machine-readable output
 

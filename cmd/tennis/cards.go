@@ -25,8 +25,17 @@ import (
 // as the long transcript that actually holds the answer, and the summary would
 // usually win.
 
-// DefaultCardDir is where cards go.
-const DefaultCardDir = "~/tennis"
+// defaultCardDir is where cards go. It honors TENNIS_CARDS the way defaultDB
+// honors TENNIS_DB, so tests and sandboxes can redirect it — without that, a
+// test that runs an import writes into the user's real home.
+const defaultCardRoot = "~/tennis"
+
+func defaultCardDir() string {
+	if p := os.Getenv("TENNIS_CARDS"); p != "" {
+		return p
+	}
+	return defaultCardRoot
+}
 
 // cardConcurrency is how many summaries are in flight at once. Summarizing is
 // the slow part of an import by orders of magnitude — a first run is hundreds
