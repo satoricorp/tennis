@@ -1,0 +1,262 @@
+/* One centred stack on white. No panels, no rules: the tinted command blocks
+   are the only fills on the page, so they read as the thing to act on. */
+.page {
+  position: relative;
+  min-height: 100vh;
+  padding: 28px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  background-color: var(--surface);
+  color: var(--carbon);
+}
+
+.stack {
+  width: 100%;
+  /* wider than a pure-prose stack: the result block is terminal output and
+     should not wrap or clip */
+  max-width: 620px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}
+
+/* Apple Garamond Light Italic. Light and small on the page for its size, so it
+   is set larger than a bold wordmark would be, and left at its natural fit —
+   Garamond italic is drawn to sit this way and tracking only breaks it. */
+.wordmark {
+  font-family: var(--font-wordmark), Garamond, serif;
+  font-weight: 300;
+  font-style: italic;
+  font-size: 82px;
+  letter-spacing: 0;
+  line-height: 1.1;
+  margin-bottom: 18px;
+}
+
+.tagline {
+  font-size: 15px;
+  line-height: 1.55;
+  text-align: center;
+  margin: 0 0 8px;
+}
+
+.subtitle {
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--muted);
+  text-align: center;
+  margin: 0 0 28px;
+  max-width: 48ch;
+  /* balance, not pretty: at three lines this copy strands "& markdown." on a
+     line of its own */
+  text-wrap: balance;
+}
+
+.subtitle em {
+  font-style: normal;
+  color: var(--carbon);
+}
+
+.block {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 24px;
+  padding: 14px 16px;
+  margin-bottom: 4px;
+  background-color: var(--panel);
+}
+
+.resultBlock {
+  align-items: flex-start;
+  /* the links used to sit under a facts table; this carries that gap now */
+  margin-bottom: 32px;
+}
+
+.line,
+.pre {
+  font-family: var(--font-mono), ui-monospace, monospace;
+  /* fluid down to phone width so the match demo — the whole argument — is
+     readable without scrolling the block sideways */
+  font-size: clamp(11px, 3vw, 14px);
+  letter-spacing: 0.01em;
+  min-width: 0;
+  overflow-x: auto;
+}
+
+.line {
+  white-space: nowrap;
+}
+
+.pre {
+  margin: 0;
+  line-height: 1.85;
+  white-space: pre;
+}
+
+/* The search question is longer than the block is wide. A real terminal wraps
+   it rather than hiding the end, and the end is the whole point. */
+.resultBlock .pre {
+  white-space: pre-wrap;
+  overflow-wrap: break-word;
+}
+
+.prompt {
+  color: var(--faint);
+}
+
+/* Colour stays inside the terminal block so the rest of the page is ink. */
+.str {
+  color: #0a3069;
+}
+
+/* The attribution is one unit — it never breaks across lines on a phone. */
+.nowrap {
+  white-space: nowrap;
+}
+
+.answerMark {
+  color: var(--faint);
+}
+
+/* the answer is the darkest thing in the block, because it is the thing you
+   came for; its provenance sits under it, quieter */
+.answer {
+  color: var(--carbon);
+}
+
+.source {
+  color: #8250df;
+}
+
+.date {
+  color: var(--muted);
+}
+
+.score {
+  color: #6e7781;
+  font-variant-numeric: tabular-nums;
+}
+
+.copy {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--faint);
+  cursor: pointer;
+  transition: color 0.15s ease;
+}
+
+.copy:hover {
+  color: var(--carbon);
+}
+
+.copy svg {
+  width: 14px;
+  height: 14px;
+  display: block;
+}
+
+.links {
+  display: inline-flex;
+  align-items: center;
+  gap: 14px;
+}
+
+.docs {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+  font-size: 13px;
+  letter-spacing: 0.02em;
+  color: var(--carbon);
+  text-decoration: none;
+  white-space: nowrap;
+  border-bottom: 1px solid var(--rule);
+  padding-bottom: 3px;
+  transition: border-color 0.15s ease;
+}
+
+.docs:hover {
+  border-bottom-color: var(--carbon);
+}
+
+/* the arrow travels up-and-right on hover, in the direction it points */
+.arrow {
+  display: inline-block;
+  transition: transform 0.18s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.docs:hover .arrow {
+  transform: translate(3px, -3px);
+}
+
+.iconLink {
+  display: inline-flex;
+  align-items: center;
+  color: var(--faint);
+  transition: color 0.15s ease;
+}
+
+.iconLink:hover {
+  color: var(--carbon);
+}
+
+.iconLink svg {
+  width: 16px;
+  height: 16px;
+  display: block;
+}
+
+.copyright {
+  position: fixed;
+  left: 28px;
+  bottom: 20px;
+  margin: 0;
+  font-size: 11px;
+  letter-spacing: 0.06em;
+  color: var(--muted);
+}
+
+.dot {
+  display: inline-block;
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background-color: var(--carbon);
+  vertical-align: middle;
+  margin: 0 2px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .arrow {
+    transition: none;
+  }
+}
+
+@media (max-width: 600px) {
+  .page {
+    padding: 20px;
+  }
+
+  .wordmark {
+    font-size: 62px;
+  }
+
+  /* every pixel here goes to the command text */
+  .block {
+    gap: 10px;
+    padding: 14px 12px;
+  }
+
+  .copyright {
+    position: static;
+    margin-top: 40px;
+  }
+}
