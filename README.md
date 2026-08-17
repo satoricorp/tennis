@@ -74,6 +74,8 @@ seeded 0, skipped 3 unchanged, 0 chunks in "notes"
 
 The `[kw#1 sem#1]` tag shows which ranker found each result and where. A hit only one ranker surfaced is a different kind of answer than one both agreed on, and tennis shows you which you got.
 
+Nothing to index yet? Start with the history you already have — point [`import`](#import--index-a-chat-export) at a Claude or ChatGPT export zip, or at `~/.claude/projects`, and search it in one command.
+
 ---
 
 ## CLI
@@ -91,6 +93,46 @@ tennis seed notes ./docs --json               # machine-readable
 Re-running `seed` is an incremental update. Files whose contents and metadata are byte-identical to what is stored are skipped entirely — not re-read into the model, not re-indexed. This is why re-seeding a large corpus after editing one file takes about as long as indexing one file.
 
 `seed` also refuses two kinds of junk, with a note on stderr: files containing binary content (a PDF's raw bytes would index without erroring and quietly pollute every future ranking), and files over 10MB (at that size it's a log or a dataset, not prose). Binary detection is a NUL-byte check in the leading 8KB, the same heuristic git uses; a binary file shorter than that window with no NUL byte in it can slip through and get indexed.
+
+### `import` — index a chat export
+
+The fastest way to have something worth searching on day one is the history you already have. `import` takes an export archive and turns it into documents:
+
+```bash
+tennis import history ~/Downloads/claude-export.zip     # a Claude data export
+tennis import history ~/Downloads/chatgpt-export.zip    # a ChatGPT data export
+tennis import agents ~/.claude/projects                 # local Claude Code sessions
+tennis import notes ~/Downloads/notes.zip               # a zip that's just files
+```
+
+It accepts a `.zip`, an already-unzipped directory, or a single transcript, and works out what it was handed by looking inside — the ChatGPT and Claude exports are told apart by the shape of their `conversations.json`, and a directory of `.jsonl` session transcripts by the fields on the first line. Pass `--format chatgpt|claude|claude-code|files` to say so outright when the guess is wrong.
+
+This exists because the alternative doesn't cover the past. Capturing conversations live — pointing a client at a proxy or a custom base URL — only ever sees traffic from the moment it is configured. Everything before that is in the export archive and nowhere else, so that archive is the thing tennis reads.
+
+By default each message becomes its own document, which is the unit you tend to remember; `--per conversation` makes each thread one document instead, for when the thread matters more than the line.
+
+```bash
+$ tennis import history ~/Downloads/claude-export.zip
+tennis: created namespace "history" bound to builtin:potion-retrieval-32M
+tennis: ~/Downloads/claude-export.zip: reading a Claude export (conversations.json, projects.json)
+tennis: 5000 documents in…
+imported 11423, skipped 0 unchanged, 14106 chunks in "history"
+
+$ tennis match history "that thing about session cookies"
+ 1. Keeping users signed in       0.0328  [kw#1 sem#1]
+    a session cookie with a refresh token is the usual shape…
+```
+
+Every document carries the attributes needed to find its way home — `source`, `session`, `role`, `title`, `created`, and for local sessions `project`, `cwd` and `branch` — so a search can be narrowed the same way any other namespace can:
+
+```bash
+tennis match history "retry logic" --where role=user
+tennis match agents "flaky test" --where project=tennis,branch=main
+```
+
+Re-importing the same archive is free. IDs are built from the export's own conversation and message IDs, so a fresh export months later writes only what is new and skips everything already indexed.
+
+Two things are deliberately left out. Local session transcripts are indexed from their text and thinking, not their tool calls and tool results — those are mostly whole file reads and command output, and letting them in would mean every search ranked file contents above what was said about them. ChatGPT messages the exporter marked as hidden are skipped for the same reason: they were never on screen.
 
 ### `put` — ingest documents that aren't files
 
@@ -177,6 +219,8 @@ tennis serve                                   # local HTTP API on 127.0.0.1:881
 | `-n <k>` | how many results (`match` only) |
 | `--mode` | `hybrid` (default), `keyword`, `semantic` |
 | `--where` | attribute filter: `key=value`, `key>value`, `key!=value`, comma-separated |
+| `--format` | override export detection (`import` only): `chatgpt`, `claude`, `claude-code`, `files` |
+| `--per` | document granularity (`import` only): `turn` (default) or `conversation` |
 
 ---
 

@@ -30,6 +30,7 @@ USAGE
 
 COMMANDS
   seed <namespace> <path...>   index files or directories
+  import <namespace> <path...> index a chat export (.zip, directory, or transcript)
   put <namespace>              ingest NDJSON documents from stdin
   match <namespace> <query>    search
   get <namespace> <id>         print one document
@@ -57,6 +58,8 @@ func main() {
 	switch cmd {
 	case "seed":
 		err = cmdSeed(args)
+	case "import":
+		err = cmdImport(args)
 	case "put":
 		err = cmdPut(args)
 	case "match":
@@ -539,6 +542,11 @@ func coerce(s string) any {
 func displayID(r tennis.Result) string {
 	if p, ok := r.Attributes["name"].(string); ok && p != "" {
 		return p
+	}
+	// Imported history has no filename, and its ID is a pair of UUIDs. The
+	// conversation's title is the only part of it a person recognizes.
+	if t, ok := r.Attributes["title"].(string); ok && t != "" {
+		return t
 	}
 	return r.ID
 }
