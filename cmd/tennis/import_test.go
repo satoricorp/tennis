@@ -657,3 +657,37 @@ func TestAddRejectsConflictingSources(t *testing.T) {
 		t.Error("add with no path should be a usage error")
 	}
 }
+
+// Resuming a Codex session writes a second session_meta naming the session it
+// forked from. Letting that one win files the whole transcript under its
+// parent, where its line numbers collide with the parent's own turns and
+// overwrite them — 62 documents vanished from a real ~/.codex this way.
+const codexResumedSession = `{"timestamp":"2026-05-31T17:39:52.000Z","type":"session_meta","payload":{"id":"CHILD","timestamp":"2026-05-31T17:39:52.000Z","cwd":"/Users/joe/git/tennis"}}
+{"timestamp":"2026-05-31T17:39:52.000Z","type":"session_meta","payload":{"id":"PARENT","timestamp":"2026-05-30T15:51:43.000Z","cwd":"/Users/joe/git/other"}}
+{"timestamp":"2026-05-31T17:40:00.000Z","type":"event_msg","payload":{"type":"user_message","message":"pick up where we left off"}}
+`
+
+func TestImportCodexResumedSessionKeepsItsOwnID(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "rollout-child.jsonl"), []byte(codexResumedSession), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	recs := collect(t, dir, formatCodex, perTurn)
+	if len(recs) != 1 {
+		t.Fatalf("got %d documents, want 1: %+v", len(recs), recs)
+	}
+	if got := recs[0].attr("session"); got != "CHILD" {
+		t.Errorf("a resumed session must keep its own id, got %q", got)
+	}
+	if !strings.HasPrefix(recs[0].ID, "codex:CHILD:") {
+		t.Errorf("document id should be namespaced by the child session: %q", recs[0].ID)
+	}
+	// The lineage is worth keeping, just not as the identity.
+	if got := recs[0].attr("forked_from"); got != "PARENT" {
+		t.Errorf("forked_from attribute: %q", got)
+	}
+	// The opening record describes this session, not the one it forked from.
+	if got := recs[0].attr("cwd"); got != "/Users/joe/git/tennis" {
+		t.Errorf("cwd should come from the first session_meta, got %q", got)
+	}
+}

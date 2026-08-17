@@ -643,6 +643,7 @@ func readCodexSession(r io.Reader, entry string, warn func(string)) (conversatio
 	sc.Buffer(make([]byte, 64*1024), maxImportLineSize)
 
 	failed, n := 0, 0
+	sawMeta := false
 	for sc.Scan() {
 		n++
 		raw := strings.TrimSpace(sc.Text())
@@ -665,6 +666,18 @@ func readCodexSession(r io.Reader, entry string, warn func(string)) (conversatio
 			if json.Unmarshal(l.Payload, &m) != nil {
 				continue
 			}
+			// Only the opening record identifies this rollout. Resuming a
+			// session writes a second session_meta naming the session it forked
+			// from, and letting that one win would file the whole transcript
+			// under its parent — where its line numbers collide with the
+			// parent's own turns and overwrite them.
+			if sawMeta {
+				if m.ID != "" && m.ID != conv.id {
+					conv.extra["forked_from"] = m.ID
+				}
+				continue
+			}
+			sawMeta = true
 			// The rollout filename already carries this UUID, but a copied or
 			// renamed file would lose it, and the ID is what makes a re-import
 			// update a document instead of duplicating it.
