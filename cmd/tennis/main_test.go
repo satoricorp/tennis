@@ -3,6 +3,7 @@ package main
 import (
 	"flag"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/satoricorp/tennis"
@@ -203,5 +204,60 @@ func TestCitation(t *testing.T) {
 func TestOneLine(t *testing.T) {
 	if got := oneLine("You stayed at\n  Hotel Esencia\n\nin Tulum.\n"); got != "You stayed at Hotel Esencia in Tulum." {
 		t.Errorf("oneLine() = %q", got)
+	}
+}
+
+func TestWrap(t *testing.T) {
+	cases := []struct {
+		name        string
+		in          string
+		width       int
+		first, rest string
+		want        string
+	}{
+		{
+			name:  "folds at the measure and indents the continuation",
+			in:    "one two three four five six",
+			width: 14, first: "> ", rest: "  ",
+			want: "> one two\n  three four\n  five six",
+		},
+		{
+			// Smart quotes are three bytes and one column; counting bytes
+			// wraps early and leaves the right margin ragged.
+			name:  "counts runes, not bytes",
+			in:    "I’m fine ok",
+			width: 11, first: "", rest: "",
+			want: "I’m fine ok",
+		},
+		{
+			name:  "keeps the author's own line breaks",
+			in:    "para one\n\npara two",
+			width: 40, first: "  ", rest: "  ",
+			want: "  para one\n\n  para two",
+		},
+		{
+			// Breaking a URL somewhere arbitrary is worse than overrunning.
+			name:  "lets an overlong word overrun",
+			in:    "see https://example.com/a/very/long/path now",
+			width: 12, first: "", rest: "",
+			want: "see\nhttps://example.com/a/very/long/path\nnow",
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := wrap(c.in, c.width, c.first, c.rest); got != c.want {
+				t.Errorf("wrap()\n got: %q\nwant: %q", got, c.want)
+			}
+		})
+	}
+}
+
+// A blank line must not carry the indent out as trailing whitespace.
+func TestWrapLeavesNoTrailingSpace(t *testing.T) {
+	got := wrap("a\n\nb", 40, "  ", "  ")
+	for _, line := range strings.Split(got, "\n") {
+		if line != strings.TrimRight(line, " ") {
+			t.Errorf("line has trailing space: %q", line)
+		}
 	}
 }

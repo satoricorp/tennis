@@ -18,6 +18,9 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+	"unicode/utf8"
+
+	"golang.org/x/term"
 
 	"github.com/satoricorp/tennis"
 	"github.com/satoricorp/tennis/embed"
@@ -373,7 +376,12 @@ type searchOpts struct {
 func registerSearchFlags(fs_ *flag.FlagSet, o *searchOpts) {
 	fs_.StringVar(&o.dbPath, "db", defaultDB(), "database file")
 	fs_.BoolVar(&o.asJSON, "json", false, "machine-readable output")
-	fs_.IntVar(&o.topK, "n", 10, "how many results")
+	// One result by default, printed in full. Asking a question and being
+	// handed ten truncated lines means reading none of them; the answer you
+	// wanted is almost always the first, so that is what you get, whole.
+	// Raising -k is how you ask to compare.
+	fs_.IntVar(&o.topK, "k", 1, "how many results")
+	fs_.IntVar(&o.topK, "n", 1, "how many results (alias for -k)")
 	fs_.StringVar(&o.mode, "mode", "hybrid", "hybrid | keyword | semantic")
 	fs_.StringVar(&o.where, "where", "", "attribute filter, e.g. status=merged (repeat with commas)")
 }
@@ -409,12 +417,13 @@ func runSearch(nsName, query string, o searchOpts) error {
 		return nil
 	}
 
-	// The best hit is the answer, so it is printed as one: the words, then
-	// where they came from. Everything below it is the runners-up, and those
-	// keep the ranked-list shape because comparing them is the point.
+	// The best hit is the answer, so it is printed as one: the words in full,
+	// then where they came from. Everything below it is the runners-up, and
+	// those keep the ranked-list shape because comparing them is the point.
+	width := textWidth()
 	top := results[0]
-	fmt.Printf("> %s\n", truncate(oneLine(top.Text), 100))
-	fmt.Printf("  %s\n", citation(top))
+	fmt.Println(wrap(top.Text, width, "> ", "  "))
+	fmt.Printf("\n  %s\n", citation(top))
 
 	for i, r := range results[1:] {
 		// Showing which ranker found a result makes the ranking legible: a hit
@@ -427,13 +436,81 @@ func runSearch(nsName, query string, o searchOpts) error {
 		if r.SemanticRank > 0 {
 			found = append(found, fmt.Sprintf("sem#%d", r.SemanticRank))
 		}
-		if i == 0 {
-			fmt.Println()
-		}
+		fmt.Println()
 		fmt.Printf("%2d. %s  [%s]\n", i+2, citation(r), strings.Join(found, " "))
-		fmt.Printf("    %s\n", truncate(oneLine(r.Text), 100))
+		fmt.Println(wrap(r.Text, width, "    ", "    "))
 	}
 	return nil
+}
+
+// textWidth is the measure result text is folded to.
+//
+// Prose stops being easy to read much past the high seventies, so a wide
+// terminal is capped rather than filled; a narrow one is honoured exactly.
+// When stdout is not a terminal — a pipe, a file, $(…) — there is no width to
+// ask for and 80 is the conventional answer.
+func textWidth() int {
+	w, _, err := term.GetSize(int(os.Stdout.Fd()))
+	if err != nil || w <= 0 {
+		w = 80
+	}
+	if w > 84 {
+		w = 84
+	}
+	if w < 32 {
+		w = 32
+	}
+	return w
+}
+
+// wrap folds s to width, opening with the first prefix and indenting every
+// line after it with rest.
+//
+// Existing line breaks are kept, because the text is usually somebody's
+// message and its paragraphs, lists and code blocks are structure worth
+// keeping. A word longer than the measure — a URL, a hash — is allowed to
+// overrun rather than be broken somewhere meaningless.
+//
+// Columns are counted in runes, not bytes. Transcripts are full of smart
+// quotes and em-dashes, and every one of them is three bytes wide and one
+// column wide; counting bytes wraps those lines early and leaves the right
+// margin visibly ragged.
+func wrap(s string, width int, first, rest string) string {
+	var b strings.Builder
+	prefix := first
+	newline := func() {
+		b.WriteString("\n")
+		prefix = rest
+	}
+	for i, line := range strings.Split(strings.TrimRight(s, "\n"), "\n") {
+		if i > 0 {
+			newline()
+		}
+		words := strings.Fields(line)
+		if len(words) == 0 {
+			b.WriteString(strings.TrimRight(prefix, " "))
+			continue
+		}
+		col := 0
+		for j, w := range words {
+			n := utf8.RuneCountInString(w)
+			switch {
+			case j == 0:
+				b.WriteString(prefix)
+				col = utf8.RuneCountInString(prefix)
+			case col+1+n > width:
+				newline()
+				b.WriteString(prefix)
+				col = utf8.RuneCountInString(prefix)
+			default:
+				b.WriteString(" ")
+				col++
+			}
+			b.WriteString(w)
+			col += n
+		}
+	}
+	return b.String()
 }
 
 // citation is the line under a result: where it came from, when, how strongly

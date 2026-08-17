@@ -58,25 +58,35 @@ tennis: created namespace "context" bound to builtin:potion-retrieval-32M
 tennis: ~/Documents/notes: reading plain files
 imported 3, skipped 0 unchanged, 3 chunks in "context"
 
-# search it
+# search it — one answer, in full
 $ tennis search "keep me signed in"
-> # Session handling Make the login flow remember the user between sessions. The session cookie is se…
+> # Session handling
+  Make the login flow remember the user between sessions. The session cookie
+  is set with an expiry so the browser keeps it after the tab closes.
+
+  auth.md [2026-08-10] 0.0328
+
+# ask for more when comparing is the point
+$ tennis search "keep me signed in" -k 2
+> # Session handling
+  Make the login flow remember the user between sessions. The session cookie
+  is set with an expiry so the browser keeps it after the tab closes.
+
   auth.md [2026-08-10] 0.0328
 
  2. config.md [2026-08-10] 0.0161  [sem#2]
-    # Configuration Write a parser for TOML configuration files. Values from the file are merged over t…
-
-# an exact term both rankers agree on scores higher
-$ tennis search "TOML"
-> # Configuration Write a parser for TOML configuration files. Values from the file are merged over t…
-  config.md [2026-08-10] 0.0328
+    # Configuration
+    Write a parser for TOML configuration files. Values from the file are
+    merged over the defaults.
 
 # re-indexing is nearly free: unchanged files are never re-embedded
 $ tennis add ~/Documents/notes
 imported 0, skipped 3 unchanged, 0 chunks in "context"
 ```
 
-The best hit is printed as the answer — the words, then where they came from and when. Below it, the runners-up keep the ranked-list shape, because comparing them is the point. The `[kw#1 sem#1]` tag shows which ranker found each one and where: a hit only one ranker surfaced is a different kind of answer than one both agreed on, and tennis shows you which you got.
+One result, printed whole: the words, then where they came from and when. You asked a question, so you get an answer you can actually read, wrapped to your terminal — not ten truncated lines to squint at.
+
+`-k` is how you ask for more, and then the runners-up take the ranked-list shape, because at that point comparing them is the point. The `[kw#1 sem#1]` tag shows which ranker found each one and where: a hit only one ranker surfaced is a different kind of answer than one both agreed on, and tennis shows you which you got.
 
 Neither command named a namespace, so both used `context`, the default. That is the whole story until you want to keep separate things separate; then `--ns work` on either command, or `$TENNIS_NS`, does it.
 
@@ -175,7 +185,7 @@ tennis: put: line 14: missing "id"
 
 ```bash
 tennis search "exponential backoff"
-tennis search "keep me signed in" -n 5             # top 5
+tennis search "keep me signed in" -k 5             # top 5, not just the best
 tennis search "retry" --mode keyword               # BM25 only
 tennis search "retry" --mode semantic              # vectors only
 tennis search "auth" --where 'status=merged'       # filter by attribute
@@ -232,7 +242,7 @@ tennis serve                                   # local HTTP API on 127.0.0.1:881
 | `--db <path>` | database file (default `~/.tennis/db.sqlite`, or `$TENNIS_DB`) |
 | `--ns <name>` | namespace for `add` and `search` (default `context`, or `$TENNIS_NS`) |
 | `--json` | machine-readable output on stdout; progress goes to stderr |
-| `-n <k>` | how many results (`search` only) |
+| `-k <n>` | how many results (`search` only, default 1; `-n` is an alias) |
 | `--mode` | `hybrid` (default), `keyword`, `semantic` |
 | `--where` | attribute filter: `key=value`, `key>value`, `key!=value`, comma-separated |
 | `--format` | override source detection (`add` only): `chatgpt`, `claude`, `claude-code`, `codex`, `files` |
