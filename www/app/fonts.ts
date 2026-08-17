@@ -18,10 +18,7 @@ export const geistMono = Geist_Mono({
   display: "swap",
 });
 
-// Apple Garamond Light Italic — the wordmark, from a local copy.
-// This file is a proprietary Bitstream cut ("unpublished work […] All rights
-// reserved. Confidential.", 1991). Clear the licensing before this repo goes
-// public, or swap in EB Garamond 300 italic from next/font/google.
+// Apple Garamond Light Italic — the wordmark, self-hosted from www/fonts.
 // The face IS the italic, so the descriptor says so: without style: "italic"
 // the browser slants an already-slanted font.
 export const wordmark = localFont({
