@@ -102,12 +102,19 @@ func writeZip(t *testing.T, name string, files map[string]string) string {
 // returns the documents that would have been written.
 func collect(t *testing.T, path, format, per string) []docRecord {
 	t.Helper()
+	return collectWarn(t, path, format, per, func(string) {})
+}
+
+// collectWarn is collect with the warnings visible, for the cases where what
+// the import declined to say is the thing under test.
+func collectWarn(t *testing.T, path, format, per string, warn func(string)) []docRecord {
+	t.Helper()
 	sink := &docSink{}
 	var recs []docRecord
 	sink.capture = func(id, text string, attrs map[string]any) {
 		recs = append(recs, docRecord{ID: id, Text: text, Attrs: attrs})
 	}
-	if _, err := importPath(path, format, per, ".md,.txt", sink, func(string) {}, true); err != nil {
+	if _, err := importPath(path, format, per, ".md,.txt", sink, warn, true); err != nil {
 		t.Fatalf("importPath(%s, %s): %v", path, format, err)
 	}
 	return recs
@@ -689,5 +696,63 @@ func TestImportCodexResumedSessionKeepsItsOwnID(t *testing.T) {
 	// The opening record describes this session, not the one it forked from.
 	if got := recs[0].attr("cwd"); got != "/Users/joe/git/tennis" {
 		t.Errorf("cwd should come from the first session_meta, got %q", got)
+	}
+}
+
+// ~/.claude holds history.jsonl beside the transcripts: the record of prompts
+// typed, with epoch-millisecond timestamps and a sessionId on every line. The
+// sessionId makes it sniff as a transcript, so the reader gets handed it and
+// must decline it quietly rather than report every line as a parse error.
+const claudeCodeHistory = `{"display":"ok, commit to main","pastedContents":{},"timestamp":1786938424866,"project":"/Users/joe/git/yeet","sessionId":"04b2d7d3-2a75-4486-b837-3e0d01992d76"}
+{"display":"now push it","pastedContents":{},"timestamp":1786938500000,"project":"/Users/joe/git/yeet","sessionId":"04b2d7d3-2a75-4486-b837-3e0d01992d76"}
+`
+
+func TestImportClaudeCodeSkipsHistoryFile(t *testing.T) {
+	// The real shape of ~/.claude: history.jsonl at the top, transcripts one
+	// directory down.
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "history.jsonl"), []byte(claudeCodeHistory), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(dir, "projects", "repo"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "projects", "repo", "S1.jsonl"), []byte(claudeCodeSession), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var warnings []string
+	recs := collectWarn(t, dir, formatClaudeCode, perTurn, func(s string) { warnings = append(warnings, s) })
+	if len(warnings) != 0 {
+		t.Errorf("a numeric timestamp is not a parse failure, got warnings: %v", warnings)
+	}
+	if len(recs) == 0 {
+		t.Fatal("the transcript beside history.jsonl should still import")
+	}
+	// history.jsonl records prompts under `display`, not `message`, so nothing
+	// in it is a turn — and its text must not reach the index by another door.
+	for _, r := range recs {
+		if strings.Contains(r.Text, "ok, commit to main") {
+			t.Errorf("history.jsonl content leaked into a document: %q", r.Text)
+		}
+		if !strings.HasPrefix(r.ID, "claude-code:") {
+			t.Errorf("unexpected document id %q", r.ID)
+		}
+	}
+}
+
+// A transcript whose timestamp arrives as a number still dates its turns.
+func TestClaudeCodeNumericTimestampBecomesADate(t *testing.T) {
+	dir := t.TempDir()
+	line := `{"type":"user","uuid":"u1","sessionId":"s1","timestamp":1786938424866,"message":{"role":"user","content":"hello"}}` + "\n"
+	if err := os.WriteFile(filepath.Join(dir, "session.jsonl"), []byte(line), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	recs := collect(t, dir, formatClaudeCode, perTurn)
+	if len(recs) != 1 {
+		t.Fatalf("got %d documents, want 1", len(recs))
+	}
+	if got := recs[0].attr("created"); !strings.HasPrefix(got, "2026-") {
+		t.Errorf("epoch milliseconds should become an RFC3339 date, got %q", got)
 	}
 }

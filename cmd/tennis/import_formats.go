@@ -396,7 +396,7 @@ type ccLine struct {
 	UUID        string     `json:"uuid"`
 	LeafUUID    string     `json:"leafUuid"`
 	SessionID   string     `json:"sessionId"`
-	Timestamp   string     `json:"timestamp"`
+	Timestamp   flexTime   `json:"timestamp"`
 	CWD         string     `json:"cwd"`
 	GitBranch   string     `json:"gitBranch"`
 	IsMeta      bool       `json:"isMeta"`
@@ -404,6 +404,41 @@ type ccLine struct {
 	Summary     string     `json:"summary"`
 	AITitle     string     `json:"aiTitle"`
 	Message     *ccMessage `json:"message"`
+}
+
+// flexTime is a timestamp that may arrive as an RFC3339 string or as an epoch
+// number.
+//
+// ~/.claude holds both kinds of file. Transcripts under projects/ write the
+// string; history.jsonl, the record of prompts typed, writes epoch
+// milliseconds — and it carries a sessionId too, so it looks like a transcript
+// right up until a strict decode fails on the number. A whole line was being
+// reported as a parse error for a field that no document ever uses.
+type flexTime string
+
+func (t *flexTime) UnmarshalJSON(b []byte) error {
+	if len(b) == 0 || string(b) == "null" {
+		return nil
+	}
+	if b[0] == '"' {
+		var s string
+		if err := json.Unmarshal(b, &s); err != nil {
+			return err
+		}
+		*t = flexTime(s)
+		return nil
+	}
+	var f float64
+	if err := json.Unmarshal(b, &f); err != nil {
+		return err
+	}
+	// Any date this side of 1973 is past 1e11 in milliseconds and short of it
+	// in seconds, which is enough to tell the two apart without being told.
+	if f > 1e11 {
+		f /= 1000
+	}
+	*t = flexTime(epochTime(&f))
+	return nil
 }
 
 type ccMessage struct {
@@ -482,7 +517,7 @@ func readClaudeCodeSession(r io.Reader, entry string, a *archive, warn func(stri
 			conv.extra["branch"] = l.GitBranch
 		}
 		if conv.create == "" {
-			conv.create = normalizeTime(l.Timestamp)
+			conv.create = normalizeTime(string(l.Timestamp))
 		}
 
 		// A session names itself as it goes, on its own line type. That title is
@@ -499,7 +534,7 @@ func readClaudeCodeSession(r io.Reader, entry string, a *archive, warn func(stri
 				}
 				conv.turns = append(conv.turns, turn{
 					id:   firstNonEmpty(l.LeafUUID, l.UUID, "summary"+strconv.Itoa(n)),
-					role: "summary", text: s, created: normalizeTime(l.Timestamp),
+					role: "summary", text: s, created: normalizeTime(string(l.Timestamp)),
 				})
 			}
 			continue
@@ -521,7 +556,7 @@ func readClaudeCodeSession(r io.Reader, entry string, a *archive, warn func(stri
 			id:      firstNonEmpty(l.UUID, "line"+strconv.Itoa(n)),
 			role:    role,
 			text:    text,
-			created: normalizeTime(l.Timestamp),
+			created: normalizeTime(string(l.Timestamp)),
 		})
 	}
 	if err := sc.Err(); err != nil {
