@@ -13,6 +13,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -417,30 +418,45 @@ func runSearch(nsName, query string, o searchOpts) error {
 		return nil
 	}
 
-	// The best hit is the answer, so it is printed as one: the words in full,
-	// then where they came from. Everything below it is the runners-up, and
-	// those keep the ranked-list shape because comparing them is the point.
-	width := textWidth()
-	top := results[0]
-	fmt.Println(wrap(top.Text, width, "> ", "  "))
-	fmt.Printf("\n  %s\n", citation(top))
-
-	for i, r := range results[1:] {
-		// Showing which ranker found a result makes the ranking legible: a hit
-		// only the semantic side surfaced is a different kind of answer than
-		// one both agreed on.
-		var found []string
-		if r.KeywordRank > 0 {
-			found = append(found, fmt.Sprintf("kw#%d", r.KeywordRank))
-		}
-		if r.SemanticRank > 0 {
-			found = append(found, fmt.Sprintf("sem#%d", r.SemanticRank))
-		}
-		fmt.Println()
-		fmt.Printf("%2d. %s  [%s]\n", i+2, citation(r), strings.Join(found, " "))
-		fmt.Println(wrap(r.Text, width, "    ", "    "))
-	}
+	renderResults(os.Stdout, results, textWidth())
 	return nil
+}
+
+// renderResults writes the human-readable form of a result set.
+func renderResults(w io.Writer, results []tennis.Result, width int) {
+	// One result is an answer, not a list of one: there is no rank to compare
+	// it against, so it is printed as the words and where they came from.
+	if len(results) == 1 {
+		top := results[0]
+		fmt.Fprintln(w, wrap(top.Text, width, "> ", "  "))
+		fmt.Fprintf(w, "\n  %s\n", citation(top))
+		return
+	}
+
+	// More than one and the ranking is the thing being shown, so every result
+	// is numbered — the best one included. Numbering the runners-up 2, 3, 4
+	// under an unnumbered answer reads as a list that lost its first item.
+	for i, r := range results {
+		if i > 0 {
+			fmt.Fprintln(w)
+		}
+		fmt.Fprintf(w, "%2d. %s  [%s]\n", i+1, citation(r), rankers(r))
+		fmt.Fprintln(w, wrap(r.Text, width, "    ", "    "))
+	}
+}
+
+// rankers names which side of the search found a result, and where it placed.
+// A hit only the semantic ranker surfaced is a different kind of answer than
+// one both agreed on, and the tag is what makes that legible.
+func rankers(r tennis.Result) string {
+	var found []string
+	if r.KeywordRank > 0 {
+		found = append(found, fmt.Sprintf("kw#%d", r.KeywordRank))
+	}
+	if r.SemanticRank > 0 {
+		found = append(found, fmt.Sprintf("sem#%d", r.SemanticRank))
+	}
+	return strings.Join(found, " ")
 }
 
 // textWidth is the measure result text is folded to.

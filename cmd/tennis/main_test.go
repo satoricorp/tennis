@@ -261,3 +261,45 @@ func TestWrapLeavesNoTrailingSpace(t *testing.T) {
 		}
 	}
 }
+
+func TestRenderResultsNumbering(t *testing.T) {
+	r := func(text string, kw, sem int) tennis.Result {
+		return tennis.Result{
+			Text: text, Score: 0.5, KeywordRank: kw, SemanticRank: sem,
+			Attributes: map[string]any{"source": "codex", "created": "2026-06-19T00:00:00Z"},
+		}
+	}
+
+	t.Run("one result is an answer, not a list of one", func(t *testing.T) {
+		var b strings.Builder
+		renderResults(&b, []tennis.Result{r("alpha", 1, 1)}, 60)
+		got := b.String()
+		if !strings.HasPrefix(got, "> alpha") {
+			t.Errorf("want the answer form, got:\n%s", got)
+		}
+		if strings.Contains(got, " 1. ") {
+			t.Errorf("a lone result should not be numbered, got:\n%s", got)
+		}
+	})
+
+	t.Run("many results are numbered from one", func(t *testing.T) {
+		var b strings.Builder
+		renderResults(&b, []tennis.Result{r("alpha", 1, 1), r("beta", 2, 2)}, 60)
+		got := b.String()
+		// The regression this guards: the list used to start at 2, under an
+		// unnumbered top result, and read as though item 1 had gone missing.
+		if !strings.Contains(got, " 1. ") {
+			t.Errorf("the best result must be numbered 1, got:\n%s", got)
+		}
+		if !strings.Contains(got, " 2. ") {
+			t.Errorf("want a second numbered result, got:\n%s", got)
+		}
+		if strings.Contains(got, "> alpha") {
+			t.Errorf("the answer form should not appear in a list, got:\n%s", got)
+		}
+		// Every entry carries its ranker tag, the top one included.
+		if strings.Count(got, "kw#") != 2 {
+			t.Errorf("both results should carry ranker tags, got:\n%s", got)
+		}
+	})
+}

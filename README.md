@@ -68,11 +68,10 @@ $ tennis search "keep me signed in"
 
 # ask for more when comparing is the point
 $ tennis search "keep me signed in" -k 2
-> # Session handling
-  Make the login flow remember the user between sessions. The session cookie
-  is set with an expiry so the browser keeps it after the tab closes.
-
-  auth.md [2026-08-10] 0.0328
+ 1. auth.md [2026-08-10] 0.0328  [kw#1 sem#1]
+    # Session handling
+    Make the login flow remember the user between sessions. The session cookie
+    is set with an expiry so the browser keeps it after the tab closes.
 
  2. config.md [2026-08-10] 0.0161  [sem#2]
     # Configuration
@@ -86,7 +85,7 @@ imported 0, skipped 3 unchanged, 0 chunks in "context"
 
 One result, printed whole: the words, then where they came from and when. You asked a question, so you get an answer you can actually read, wrapped to your terminal — not ten truncated lines to squint at.
 
-`-k` is how you ask for more, and then the runners-up take the ranked-list shape, because at that point comparing them is the point. The `[kw#1 sem#1]` tag shows which ranker found each one and where: a hit only one ranker surfaced is a different kind of answer than one both agreed on, and tennis shows you which you got.
+`-k` is how you ask for more, and then every result is numbered — the best one included — because at that point you are reading a ranking rather than an answer. The `[kw#1 sem#1]` tag shows which ranker found each one and where: a hit only one ranker surfaced is a different kind of answer than one both agreed on, and tennis shows you which you got.
 
 Neither command named a namespace, so both used `context`, the default. That is the whole story until you want to keep separate things separate; then `--ns work` on either command, or `$TENNIS_NS`, does it.
 
