@@ -1,6 +1,5 @@
-/* One centred stack over the ASCII wave. No panels, no rules: the tinted
-   command blocks are the only fills on the page, so they read as the thing to
-   act on, and they sit opaque over the field. */
+/* One centred stack on white. No panels, no rules: the tinted command blocks
+   are the only fills on the page, so they read as the thing to act on. */
 .page {
   position: relative;
   min-height: 100vh;
@@ -13,38 +12,7 @@
   color: var(--carbon);
 }
 
-/* The wave's own canvas is absolute within this box, so the box has to be the
-   full page rather than the size of its (empty) content. */
-.wave {
-  position: absolute;
-  inset: 0;
-  z-index: 0;
-  overflow: hidden;
-}
-
-/* The field runs at full strength to the edges, where it is texture, and is
-   cleared to paper under the middle, where it is behind 13px grey type.
-   Sized in px, not percentages, because what it clears is .stack — a column
-   that is 620px and stops growing. Percentages would track the viewport
-   instead and shrink the clearing on a phone, which is the one place the
-   column already spans the full width and needs it widest. Wider than the
-   column on purpose: the fade then lands in empty margin, never on a word. */
-.wave::after {
-  content: "";
-  position: absolute;
-  inset: 0;
-  pointer-events: none;
-  background: radial-gradient(
-    ellipse 560px 360px at 50% 50%,
-    var(--surface) 0%,
-    var(--surface) 40%,
-    rgba(255, 255, 255, 0) 100%
-  );
-}
-
 .stack {
-  position: relative;
-  z-index: 1;
   width: 100%;
   /* wider than a pure-prose stack: the result block is terminal output and
      should not wrap or clip */
@@ -64,7 +32,28 @@
   font-size: 82px;
   letter-spacing: 0;
   line-height: 1.1;
+}
+
+/* Carries the ball; the margin the wordmark used to own moves here. */
+.mark {
+  position: relative;
+  display: inline-block;
   margin-bottom: 18px;
+}
+
+/* Absolute, so it adds nothing to the wrapper's width and leaves the wordmark
+   centred in the stack. Sat high against the cap line rather than beside the
+   word, which is what makes it read as an exponent and not as a second glyph.
+   The type shrinks with the box because what has to hold is the cell count, not
+   the pixel size — at 3px this is 22 cells across, which is about the floor for
+   a seam that still reads as a curve. */
+.markBall {
+  position: absolute;
+  left: 100%;
+  top: 0;
+  width: 40px;
+  height: 40px;
+  margin-left: 0;
 }
 
 .tagline {
@@ -248,7 +237,6 @@
 
 .copyright {
   position: fixed;
-  z-index: 1;
   left: 28px;
   bottom: 20px;
   margin: 0;
@@ -276,6 +264,14 @@
 @media (max-width: 600px) {
   .page {
     padding: 20px;
+  }
+
+  /* Tracks the wordmark down, so the mark stays a mark and does not crowd the
+     final letter. Blocks hold the shape at this size where punctuation would
+     not have. */
+  .markBall {
+    width: 32px;
+    height: 32px;
   }
 
   .wordmark {

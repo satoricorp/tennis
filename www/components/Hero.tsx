@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import WaveBackground from "./WaveBackground";
+import BallBackground from "./BallBackground";
 import styles from "./Hero.module.css";
 
 // One source of truth for the strings that appear in more than one place.
@@ -75,10 +75,14 @@ function CopyButton({ value, label }: { value: string; label: string }) {
 export default function Hero() {
   return (
     <main className={styles.page}>
-      <WaveBackground className={styles.wave} />
-
       <div className={styles.stack}>
-        <span className={styles.wordmark}>Tennis</span>
+        {/* The ball rides the wordmark rather than sitting in the line, so
+            "Tennis" stays optically centred in the stack and the mark hangs off
+            its shoulder the way a ® would. */}
+        <span className={styles.mark}>
+          <span className={styles.wordmark}>Tennis</span>
+          <BallBackground className={styles.markBall} fontSize={3} />
+        </span>
 
         <p className={styles.tagline}>Store all of your context in one place</p>
         <p className={styles.subtitle}>
