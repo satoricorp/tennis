@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import WaveBackground from "./WaveBackground";
 import styles from "./Hero.module.css";
 
 // One source of truth for the strings that appear in more than one place.
@@ -74,6 +75,8 @@ function CopyButton({ value, label }: { value: string; label: string }) {
 export default function Hero() {
   return (
     <main className={styles.page}>
+      <WaveBackground className={styles.wave} />
+
       <div className={styles.stack}>
         <span className={styles.wordmark}>Tennis</span>
 

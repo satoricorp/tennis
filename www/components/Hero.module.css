@@ -1,5 +1,6 @@
-/* One centred stack on white. No panels, no rules: the tinted command blocks
-   are the only fills on the page, so they read as the thing to act on. */
+/* One centred stack over the ASCII wave. No panels, no rules: the tinted
+   command blocks are the only fills on the page, so they read as the thing to
+   act on, and they sit opaque over the field. */
 .page {
   position: relative;
   min-height: 100vh;
@@ -12,7 +13,38 @@
   color: var(--carbon);
 }
 
+/* The wave's own canvas is absolute within this box, so the box has to be the
+   full page rather than the size of its (empty) content. */
+.wave {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  overflow: hidden;
+}
+
+/* The field runs at full strength to the edges, where it is texture, and is
+   cleared to paper under the middle, where it is behind 13px grey type.
+   Sized in px, not percentages, because what it clears is .stack — a column
+   that is 620px and stops growing. Percentages would track the viewport
+   instead and shrink the clearing on a phone, which is the one place the
+   column already spans the full width and needs it widest. Wider than the
+   column on purpose: the fade then lands in empty margin, never on a word. */
+.wave::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background: radial-gradient(
+    ellipse 560px 360px at 50% 50%,
+    var(--surface) 0%,
+    var(--surface) 40%,
+    rgba(255, 255, 255, 0) 100%
+  );
+}
+
 .stack {
+  position: relative;
+  z-index: 1;
   width: 100%;
   /* wider than a pure-prose stack: the result block is terminal output and
      should not wrap or clip */
@@ -216,6 +248,7 @@
 
 .copyright {
   position: fixed;
+  z-index: 1;
   left: 28px;
   bottom: 20px;
   margin: 0;
