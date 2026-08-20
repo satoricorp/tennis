@@ -7,8 +7,8 @@ import (
 )
 
 // The art is generated, so what is worth testing is that it is still something
-// a terminal can print: the four block glyphs and spaces, no wider than the
-// width a terminal is always at least, and nothing trailing.
+// a terminal can print: the three characters it is drawn with and spaces, no
+// wider than the width a terminal is always at least, and nothing trailing.
 func TestLogoArtIsPrintable(t *testing.T) {
 	lines := logoLines()
 	if len(lines) == 0 {
@@ -18,7 +18,7 @@ func TestLogoArtIsPrintable(t *testing.T) {
 	for i, line := range lines {
 		for _, c := range line {
 			switch c {
-			case ' ', '▀', '▄', '█':
+			case ' ', '#', '"', '_':
 			default:
 				t.Fatalf("line %d: unexpected %q in the art", i, c)
 			}

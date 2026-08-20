@@ -6,11 +6,15 @@ package main
 // sampled by www/scripts/gen-logo.mts from the same font the site loads and the
 // same module that raycasts the ball on the page.
 //
-// It is drawn in half blocks because a character cell is twice as tall as it is
-// wide: one pixel to a cell and the ball comes out an ellipse, two pixels to a
-// cell and it is round. Everything is in the terminal's own ink, so the mark
-// reads whichever way round the theme runs, and the ball's seam is a gap cut
-// out of the ball the same way it is a gap in the green on the page.
+// Three characters draw it, picked for where their ink sits rather than how
+// much of it there is: a cell lit along its top is a quote, along its bottom an
+// underscore, and lit through a hash. That is what carries the resolution — a
+// character cell is twice as tall as it is wide, so the mark is sampled two
+// pixels to a cell, and the pair has to come back out as one character.
+//
+// Everything is in the terminal's own ink, so the mark reads whichever way
+// round the theme runs, and the ball's seam is a gap cut out of the ball the
+// same way it is a gap in the green on the page.
 
 import (
 	"fmt"
@@ -56,13 +60,9 @@ func logoFits(f *os.File) bool {
 	if !term.IsTerminal(int(f.Fd())) {
 		return false
 	}
-	// TERM=dumb is a terminal saying it cannot be relied on for anything past
-	// the letters, and block elements are past the letters.
-	if t := os.Getenv("TERM"); t == "" || t == "dumb" {
-		return false
-	}
 	// Narrower than the mark and every line of it wraps, which is worse than
-	// not printing it.
+	// not printing it. Nothing else is asked of the terminal: the mark is ASCII,
+	// so there is no encoding for it to arrive wrong in.
 	w, _, err := term.GetSize(int(f.Fd()))
 	return err == nil && w >= logoWidth()
 }
