@@ -6,8 +6,8 @@ import (
 	"testing"
 )
 
-// The art is generated, so what is worth testing is that it is still something
-// a terminal can print: the three characters it is drawn with and spaces, no
+// The art is edited by hand, so what is worth testing is that it is still
+// something a terminal can print: the glyphs it is drawn with and spaces, no
 // wider than the width a terminal is always at least, and nothing trailing.
 func TestLogoArtIsPrintable(t *testing.T) {
 	lines := logoLines()
@@ -18,7 +18,7 @@ func TestLogoArtIsPrintable(t *testing.T) {
 	for i, line := range lines {
 		for _, c := range line {
 			switch c {
-			case ' ', '#', '"', '_':
+			case ' ', '█', '║', '═', '╔', '╗', '╚', '╝':
 			default:
 				t.Fatalf("line %d: unexpected %q in the art", i, c)
 			}
