@@ -84,11 +84,12 @@ export default function Hero() {
           <BallBackground className={styles.markBall} fontSize={3} />
         </span>
 
-        <p className={styles.tagline}>Store all of your context in one place</p>
+        <p className={styles.tagline}>
+          Store all of your sessions, take them anywhere.
+        </p>
         <p className={styles.subtitle}>
-          Tennis can collect sessions from Claude, ChatGPT, Codex, and more,
-          including local files. Your context is stored locally in SQLite &amp;
-          markdown.
+          Tennis collects context from any app or file, generates markdown
+          summaries to easily review, and can be stored and used anywhere.
         </p>
 
         <div className={styles.block}>

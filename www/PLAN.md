@@ -15,8 +15,10 @@ Secondary: **Releases** (a binary, for people without a Go toolchain) and
 ## Tech
 
 - Next.js app router, one route (`app/page.tsx` → `components/Hero.tsx`)
-- Geist + Geist Mono from `next/font/google` — no font files in the repo, so
-  nothing here is licensed more narrowly than the MIT code it advertises
+- Geist + Geist Mono from `next/font/google` for UI and the terminal blocks
+- Two licensed faces self-hosted from `www/fonts`, both narrower than the MIT
+  code they advertise — Apple Garamond Light Italic (wordmark) and Berkeley
+  Mono (the pitch). Check the licence covers web embedding before shipping.
 - No analytics / trackers
 
 ## Page
@@ -35,7 +37,8 @@ CLI changes.
   noun; `tennis` stays lowercase everywhere it is the binary you type
 - No accent colour: the page is ink on white, and the only colour is inside
   the terminal block (the quoted query, and the `[sem#1]` ranker tag)
-- Tagline: "Local search that actually finds things"
+- Tagline: "Store all of your sessions, take them anywhere." — set, with the
+  sentence under it, in Berkeley Mono: the pitch reads as machine output
 
 ## Ship
 

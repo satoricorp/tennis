@@ -32,3 +32,12 @@ export const wordmark = localFont({
   variable: "--font-wordmark",
   display: "block",
 });
+
+// Berkeley Mono Variable — self-hosted from www/fonts. The two lines under the
+// wordmark are set in it: the pitch reads as something the machine printed,
+// which is the claim the page is making.
+export const berkeleyMono = localFont({
+  src: "../fonts/BerkeleyMonoVariable.otf",
+  variable: "--font-berkeley-mono",
+  display: "swap",
+});

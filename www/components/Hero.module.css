@@ -56,23 +56,33 @@
   margin-left: 0;
 }
 
+/* The pitch is set in Berkeley Mono, so the two lines under the wordmark read
+   as something the machine printed — which is what the page is selling. Mono
+   runs optically larger and wider than Geist at the same size, so both lines
+   come down a step and lose the tracking they were carrying. */
 .tagline {
-  font-size: 15px;
-  line-height: 1.55;
+  font-family: var(--font-berkeley-mono), ui-monospace, monospace;
+  font-size: 14px;
+  line-height: 1.5;
+  letter-spacing: -0.01em;
   text-align: center;
-  margin: 0 0 8px;
+  margin: 0 0 10px;
 }
 
 .subtitle {
-  font-size: 13px;
-  line-height: 1.6;
+  font-family: var(--font-berkeley-mono), ui-monospace, monospace;
+  font-size: 12px;
+  line-height: 1.7;
+  letter-spacing: -0.01em;
   color: var(--muted);
   text-align: center;
   margin: 0 0 28px;
-  max-width: 48ch;
-  /* balance, not pretty: at three lines this copy strands "& markdown." on a
-     line of its own */
-  text-wrap: balance;
+  /* ch is a real character in a mono face, so this is a count, not an estimate.
+     The sentence is three clauses of 45, 46 and 36 characters, and 47 is the
+     only measure that breaks it on its commas — one clause to a line. Balance
+     is off for the same reason: it evens the rag by breaking "any app or /
+     file" and "to easily / review", which is what it is trying to avoid. */
+  max-width: 47ch;
 }
 
 .subtitle em {

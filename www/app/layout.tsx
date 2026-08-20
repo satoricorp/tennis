@@ -1,11 +1,11 @@
 import type { Metadata } from "next";
-import { geist, geistMono, wordmark } from "./fonts";
+import { berkeleyMono, geist, geistMono, wordmark } from "./fonts";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "Tennis — store all of your context in one place",
+  title: "Tennis — store all of your sessions, take them anywhere",
   description:
-    "Tennis can collect sessions from Claude, ChatGPT, Codex, and more, including local files. Your context is stored locally in SQLite & markdown.",
+    "Tennis collects context from any app or file, generates markdown summaries to easily review, and can be stored and used anywhere.",
 };
 
 export default function RootLayout({
@@ -14,7 +14,7 @@ export default function RootLayout({
   return (
     <html lang="en">
       <body
-        className={`${geist.variable} ${geistMono.variable} ${wordmark.variable}`}
+        className={`${geist.variable} ${geistMono.variable} ${wordmark.variable} ${berkeleyMono.variable}`}
       >
         {children}
       </body>
