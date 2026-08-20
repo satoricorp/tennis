@@ -16,7 +16,10 @@ jobs:
         with:
           go-version: '1.25'
       - run: go vet ./...
-      - run: gofmt -l . && test -z "$(gofmt -l .)"
+      # Tracked files only. A plain `gofmt -l .` walks the filesystem rather
+      # than the module, so it would also parse the Go init templates aws-cdk
+      # ships under infra/node_modules once anyone runs npm install there.
+      - run: gofmt -l $(git ls-files '*.go') && test -z "$(gofmt -l $(git ls-files '*.go'))"
       # Tests that need the 123MB model skip themselves when it is absent;
       # everything else (chunker fuzz seeds, CLI parsing, OpenAI client,
       # safetensors errors) runs for real.
@@ -34,3 +37,79 @@ jobs:
       - run: CGO_ENABLED=0 GOOS=darwin GOARCH=amd64 go build -o /dev/null ./cmd/tennis
       - run: CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -o /dev/null ./cmd/tennis
       - run: CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o /dev/null ./cmd/tennis
+
+  # install.sh is the front door and nothing in the Go suite touches it, so it
+  # gets linted and then actually run against a release built here.
+  install-script:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+
+      - run: shellcheck -s sh scripts/install.sh
+      - run: shellcheck -s bash scripts/render-manifest.sh
+
+      # Stand up the exact key layout the release workflow publishes, serve it
+      # over HTTP, and install from it the way a user would.
+      - name: Install from a synthetic release
+        run: |
+          set -euo pipefail
+          version=9.9.9
+          arch="$(uname -m)"
+          case "$arch" in x86_64) arch=amd64 ;; aarch64) arch=arm64 ;; esac
+          host="$RUNNER_TEMP/host"
+          mkdir -p "$host/v$version"
+
+          CGO_ENABLED=0 go build -ldflags "-X main.version=$version" \
+            -o "$host/tennis" ./cmd/tennis
+          tar -czf "$host/v$version/tennis_${version}_linux_${arch}.tar.gz" \
+            -C "$host" tennis
+          rm "$host/tennis"
+          (cd "$host/v$version" && sha256sum ./*.tar.gz | sed 's| \./| |' > checksums.txt)
+          printf '%s\n' "$version" > "$host/VERSION"
+
+          TENNIS_DOWNLOAD_HOST=127.0.0.1:8080 VERSION="$version" \
+            scripts/render-manifest.sh "$host/v$version"
+          sed 's|TENNIS_DOWNLOAD_HOST|127.0.0.1:8080|g' scripts/install.sh > "$host/install.sh"
+
+          # --directory rather than a subshell cd, so $! is unambiguously the
+          # server and the trap can actually kill it.
+          python3 -m http.server 8080 --directory "$host" >/dev/null 2>&1 &
+          server=$!
+          trap 'kill "$server" 2>/dev/null || true' EXIT
+          for _ in $(seq 10); do
+            curl -fsS http://127.0.0.1:8080/VERSION >/dev/null 2>&1 && break
+            sleep 1
+          done
+
+          export TENNIS_INSTALL_BASE_URL=http://127.0.0.1:8080
+          export TENNIS_INSTALL_DIR="$RUNNER_TEMP/bin"
+          curl -fsSL "$TENNIS_INSTALL_BASE_URL/install.sh" | sh
+          test -x "$RUNNER_TEMP/bin/tennis"
+          "$RUNNER_TEMP/bin/tennis" version | grep -q "$version"
+
+          # A tampered archive must be refused, not installed.
+          printf 'tampered' | gzip > "$host/v$version/tennis_${version}_linux_${arch}.tar.gz"
+          if curl -fsSL "$TENNIS_INSTALL_BASE_URL/install.sh" | sh 2>/dev/null; then
+            echo "installer accepted an archive that failed its checksum" >&2
+            exit 1
+          fi
+          echo "installer verified: good release installs, tampered release refused"
+
+  # Catches stack mistakes at PR time; a full synth needs AWS credentials for
+  # the hosted-zone lookup, so this typechecks only.
+  infra:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: infra/package-lock.json
+      - run: npm ci
+        working-directory: infra
+      - run: npm run typecheck
+        working-directory: infra

@@ -5,10 +5,18 @@ on:
 
 permissions:
   contents: write
+  # Required for the OIDC token the AWS publish step exchanges for a role.
+  id-token: write
 
 jobs:
   goreleaser:
     runs-on: ubuntu-latest
+    env:
+      AWS_REGION: us-east-1
+      AWS_ROLE_TO_ASSUME: ${{ secrets.AWS_ROLE_TO_ASSUME }}
+      TENNIS_DOWNLOAD_HOST: ${{ vars.TENNIS_DOWNLOAD_HOST }}
+      TENNIS_DOWNLOAD_BUCKET: ${{ vars.TENNIS_DOWNLOAD_BUCKET }}
+      TENNIS_DOWNLOAD_DISTRIBUTION_ID: ${{ vars.TENNIS_DOWNLOAD_DISTRIBUTION_ID }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -27,3 +35,121 @@ jobs:
           args: release --clean
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # Everything below mirrors the GitHub release onto the CloudFront
+      # download host, so `curl | sh` needs no version and no GitHub API call.
+      # It is skipped rather than failed when the host is not configured yet:
+      # a tag should still cut a GitHub release before the infra exists.
+      - name: Check download host configuration
+        id: host
+        run: |
+          if [ -n "$TENNIS_DOWNLOAD_HOST" ] && [ -n "$TENNIS_DOWNLOAD_BUCKET" ] &&
+             [ -n "$TENNIS_DOWNLOAD_DISTRIBUTION_ID" ] && [ -n "$AWS_ROLE_TO_ASSUME" ]; then
+            echo "configured=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::Download host not configured; published to GitHub releases only." \
+                 "Set vars TENNIS_DOWNLOAD_HOST, TENNIS_DOWNLOAD_BUCKET," \
+                 "TENNIS_DOWNLOAD_DISTRIBUTION_ID and secret AWS_ROLE_TO_ASSUME to enable it."
+          fi
+
+      - name: Configure AWS credentials
+        if: steps.host.outputs.configured == 'true'
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.AWS_ROLE_TO_ASSUME }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Stage the download host payload
+        if: steps.host.outputs.configured == 'true'
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          echo "VERSION=$version" >> "$GITHUB_ENV"
+
+          # The checked-in installer carries a placeholder host so the repo
+          # never hardcodes a domain; the published copy gets the real one.
+          sed "s|TENNIS_DOWNLOAD_HOST|$TENNIS_DOWNLOAD_HOST|g" \
+            scripts/install.sh > dist/install.sh
+          if grep -q 'TENNIS_DOWNLOAD_HOST' dist/install.sh; then
+            echo "install.sh still contains the placeholder after substitution" >&2
+            exit 1
+          fi
+          sh -n dist/install.sh
+
+          VERSION="$version" scripts/render-manifest.sh dist
+          printf '%s\n' "$version" > dist/VERSION
+          printf 'tennis: no such download\n' > dist/404.txt
+
+          # Unversioned aliases for Dockerfiles. Their names do not match the
+          # entries in checksums.txt, so each gets its own .sha256 next to it.
+          mkdir -p dist/latest
+          for archive in dist/tennis_"$version"_*.tar.gz; do
+            base="$(basename "$archive")"
+            platform="${base#tennis_"${version}"_}"
+            cp "$archive" "dist/latest/tennis_$platform"
+            sha="$(awk -v w="$base" '$2 == w || $2 == "*" w {print $1}' dist/checksums.txt)"
+            test -n "$sha" || { echo "$base missing from checksums.txt" >&2; exit 1; }
+            printf '%s  tennis_%s\n' "$sha" "$platform" > "dist/latest/tennis_$platform.sha256"
+          done
+
+      - name: Publish to the download host
+        if: steps.host.outputs.configured == 'true'
+        run: |
+          set -euo pipefail
+          bucket="s3://$TENNIS_DOWNLOAD_BUCKET"
+          immutable="public, max-age=31536000, immutable"
+          # Short, not no-cache: these keys change only on release, and the
+          # invalidation below is what actually makes a new version visible.
+          mutable="public, max-age=300"
+
+          # Versioned archives first, so /VERSION never points at a release
+          # whose files have not landed yet.
+          for archive in dist/tennis_"$VERSION"_*.tar.gz; do
+            aws s3 cp "$archive" "$bucket/v$VERSION/$(basename "$archive")" \
+              --content-type application/gzip --cache-control "$immutable"
+          done
+          aws s3 cp dist/checksums.txt "$bucket/v$VERSION/checksums.txt" \
+            --content-type text/plain --cache-control "$immutable"
+
+          for f in dist/latest/tennis_*.tar.gz; do
+            aws s3 cp "$f" "$bucket/latest/$(basename "$f")" \
+              --content-type application/gzip --cache-control "$mutable"
+          done
+          for f in dist/latest/tennis_*.sha256; do
+            aws s3 cp "$f" "$bucket/latest/$(basename "$f")" \
+              --content-type text/plain --cache-control "$mutable"
+          done
+
+          aws s3 cp dist/install.sh "$bucket/install.sh" \
+            --content-type text/x-shellscript --cache-control "$mutable"
+          aws s3 cp dist/manifest.json "$bucket/manifest.json" \
+            --content-type application/json --cache-control "$mutable"
+          aws s3 cp dist/404.txt "$bucket/404.txt" \
+            --content-type text/plain --cache-control "$mutable"
+          # Last: the installer reads this to decide what to fetch.
+          aws s3 cp dist/VERSION "$bucket/VERSION" \
+            --content-type text/plain --cache-control "$mutable"
+
+          aws cloudfront create-invalidation \
+            --distribution-id "$TENNIS_DOWNLOAD_DISTRIBUTION_ID" \
+            --paths /install.sh /VERSION /manifest.json /404.txt '/latest/*' >/dev/null
+
+      - name: Verify the published install path
+        if: steps.host.outputs.configured == 'true'
+        run: |
+          set -euo pipefail
+          host="https://$TENNIS_DOWNLOAD_HOST"
+          # CloudFront invalidations are not instant; give the edge a moment.
+          for attempt in 1 2 3 4 5 6; do
+            published="$(curl -fsS "$host/VERSION" 2>/dev/null | tr -d ' \r\n' || true)"
+            [ "$published" = "$VERSION" ] && break
+            echo "attempt $attempt: edge still serving '${published:-nothing}', want '$VERSION'"
+            sleep 10
+          done
+          test "$published" = "$VERSION" ||
+            { echo "$host/VERSION never reached $VERSION" >&2; exit 1; }
+
+          curl -fsSL "$host/install.sh" | sh -n -
+          curl -fsSI "$host/v$VERSION/tennis_${VERSION}_linux_amd64.tar.gz" >/dev/null
+          echo "Published: curl -fsSL $host/install.sh | sh"

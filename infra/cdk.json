@@ -1,0 +1,7 @@
+{
+  "app": "npx tsx bin/tennis.ts",
+  "context": {
+    "@aws-cdk/core:stackRelativeExports": true,
+    "@aws-cdk/aws-iam:minimizePolicies": true
+  }
+}
