@@ -67,6 +67,7 @@ Run 'tennis <command> --help' for command flags.
 
 func main() {
 	if len(os.Args) < 2 {
+		writeLogo(os.Stderr)
 		fmt.Fprint(os.Stderr, usage)
 		os.Exit(2)
 	}
@@ -100,6 +101,7 @@ func main() {
 	case "version":
 		fmt.Println("tennis " + version)
 	case "-h", "--help", "help":
+		writeLogo(os.Stdout)
 		fmt.Print(usage)
 	default:
 		fmt.Fprintf(os.Stderr, "unknown command %q\n\n%s", cmd, usage)
