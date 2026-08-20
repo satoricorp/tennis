@@ -17,6 +17,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"runtime/debug"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -27,7 +28,12 @@ import (
 	"github.com/satoricorp/tennis/embed"
 )
 
-const usage = `tennis — local hybrid search. Keyword + semantic, one file, no server.
+// The help screen is the product's table of contents, so it lists what a
+// person should reach for and nothing else. Everything still supported but not
+// worth a newcomer's attention lives behind --agents: an agent reading the
+// help wants the whole surface, a person wants the six commands that matter.
+// Both are printed from the same pieces so the two can never drift.
+const usageHead = `tennis — local hybrid search. Keyword + semantic, one file, no server.
 
 USAGE
   tennis <command> [flags]
@@ -36,39 +42,66 @@ COMMANDS
   add <path...>                index sessions or files
   search <query>               search
   ls [source]                  list what tennis has, newest first
-  put <namespace>              ingest NDJSON documents from stdin
-  get <namespace> <id>         print one document
-  rm <namespace> <id...>       delete documents
-  ns [list|create|drop]        manage namespaces
-  serve                        start the local HTTP API
+  rm <id...>                   delete documents
+  ns [list|create|rm]          manage namespaces
   version
+`
 
+// usageAgents is the rest of the surface: supported, tested, and deliberately
+// not advertised. serve is a niche escape hatch rather than the normal way to
+// use tennis, and seed/import/match are the same commands as add and search
+// with the namespace spelled first.
+const usageAgents = `
+ALSO AVAILABLE
+  serve                        start the local HTTP API on 127.0.0.1:8817
+  seed <namespace> <path...>   like add --files, namespace first
+  import <namespace> <path...> like add, namespace first
+  match <namespace> <query>    like search, namespace first
+`
+
+const usageTail = `
 SOURCES
   tennis add --chatgpt <export.zip>       a ChatGPT export
   tennis add --claude <export.zip>        a Claude export
   tennis add --claude-code ~/.claude      Claude Code transcripts
   tennis add --codex ~/.codex             Codex transcripts
   tennis add --files ~/Documents/notes    plain files
+  tennis add --ndjson < docs.ndjson       documents from a program, on stdin
   Without a source flag, add reads the path and works out which it is.
 
 COMMON FLAGS
   --db <path>    database file (default ~/.tennis/db.sqlite, or $TENNIS_DB)
   --cards <dir>  where summary cards are written (default ~/tennis, or $TENNIS_CARDS)
-  --ns <name>    namespace for add and search (default ` + defaultNamespace + `, or $TENNIS_NS)
+  --ns <name>    namespace for add, search and rm (default ` + defaultNamespace + `, or $TENNIS_NS)
   --json         machine-readable output
-
-NAMING THE NAMESPACE POSITIONALLY
-  seed <namespace> <path...>   like add --files
-  import <namespace> <path...> like add
-  match <namespace> <query>    like search
 
 Run 'tennis <command> --help' for command flags.
 `
 
+// helpText assembles the screen. The pointer to --agents is only printed on
+// the short one, because on the long one there is nothing left to point at.
+func helpText(agents bool) string {
+	if agents {
+		return usageHead + usageAgents + usageTail
+	}
+	return usageHead + usageTail + "Run 'tennis --agents' for the full command surface.\n"
+}
+
+// wantsAgents reports whether --agents appears in args, so it can be written
+// either way round: `tennis --agents` and `tennis help --agents` both work.
+func wantsAgents(args []string) bool {
+	for _, a := range args {
+		if a == "--agents" || a == "-agents" {
+			return true
+		}
+	}
+	return false
+}
+
 func main() {
 	if len(os.Args) < 2 {
 		writeLogo(os.Stderr)
-		fmt.Fprint(os.Stderr, usage)
+		fmt.Fprint(os.Stderr, helpText(false))
 		os.Exit(2)
 	}
 	cmd := os.Args[1]
@@ -86,12 +119,8 @@ func main() {
 		err = cmdSeed(args)
 	case "import":
 		err = cmdImport(args)
-	case "put":
-		err = cmdPut(args)
 	case "match":
 		err = cmdMatch(args)
-	case "get":
-		err = cmdGet(args)
 	case "rm":
 		err = cmdRm(args)
 	case "ns":
@@ -99,12 +128,20 @@ func main() {
 	case "serve":
 		err = cmdServe(args)
 	case "version":
-		fmt.Println("tennis " + version)
+		fmt.Println("tennis " + buildVersion())
 	case "-h", "--help", "help":
+		// The block-letter mark is for a person opening the tool. --agents
+		// output is read by a program, so it gets the text and nothing else.
+		if wantsAgents(args) {
+			fmt.Print(helpText(true))
+			break
+		}
 		writeLogo(os.Stdout)
-		fmt.Print(usage)
+		fmt.Print(helpText(false))
+	case "--agents", "-agents":
+		fmt.Print(helpText(true))
 	default:
-		fmt.Fprintf(os.Stderr, "unknown command %q\n\n%s", cmd, usage)
+		fmt.Fprintf(os.Stderr, "unknown command %q\n\n%s", cmd, helpText(false))
 		os.Exit(2)
 	}
 	if err != nil {
@@ -113,9 +150,60 @@ func main() {
 	}
 }
 
-// version is stamped by the release build (-ldflags "-X main.version=...");
-// a from-source build reports dev.
-var version = "dev"
+// version and commit are stamped by the release build
+// (-ldflags "-X main.version=... -X main.commit=..."); a from-source build
+// leaves them alone and buildVersion recovers what it can.
+var (
+	version = "dev"
+	commit  = ""
+)
+
+// buildVersion is the line `tennis version` prints: the tag, and the commit it
+// was actually built from.
+//
+// The tag alone does not identify a binary. Most tennis binaries in existence
+// come from `go build ./cmd/tennis` in a working tree, where the tag is the
+// literal string "dev" and the commit is the only thing telling one apart from
+// another. Go already stamps vcs.revision into anything built inside a
+// checkout, so the fact is in the file; this reads it back out.
+//
+// A binary from `go install ...@version` carries no VCS stamp — the module
+// cache is not a checkout — but does carry the module version, which answers
+// the same question by another name.
+func buildVersion() string {
+	v, c, dirty := version, commit, false
+	bi, ok := debug.ReadBuildInfo()
+	if ok {
+		for _, s := range bi.Settings {
+			switch s.Key {
+			case "vcs.revision":
+				if c == "" {
+					c = s.Value
+				}
+			case "vcs.modified":
+				dirty = s.Value == "true"
+			}
+		}
+	}
+	// bi.Main.Version is only consulted when there is no VCS stamp, which is
+	// precisely the `go install ...@v1.2.3` case it answers. Consulting it for
+	// a working-tree build instead yields the module pseudo-version — a string
+	// like v0.1.1-0.20260820143053-b489e77ca87b that already ends in the same
+	// commit this function is about to print, twice over.
+	if ok && c == "" && v == "dev" && bi.Main.Version != "" && bi.Main.Version != "(devel)" {
+		v = bi.Main.Version
+	}
+	if c == "" {
+		return v
+	}
+	if len(c) > 12 {
+		c = c[:12]
+	}
+	if dirty {
+		return fmt.Sprintf("%s (%s, dirty)", v, c)
+	}
+	return fmt.Sprintf("%s (%s)", v, c)
+}
 
 // parseInterleaved parses args allowing flags before, between, or after
 // positional arguments, returning the positionals in order.
@@ -583,52 +671,34 @@ func resultDate(r tennis.Result) string {
 	return s
 }
 
+// plural renders a count with its noun. "1 documents" in a warning about
+// destroying data reads as a bug in the thing doing the destroying, which is
+// not what you want a person reading at that particular moment.
+func plural(n int, one string) string {
+	if n == 1 {
+		return fmt.Sprintf("%d %s", n, one)
+	}
+	return fmt.Sprintf("%d %ss", n, one)
+}
+
 func oneLine(s string) string {
 	return strings.Join(strings.Fields(s), " ")
 }
 
-func cmdGet(args []string) error {
-	fs_ := flag.NewFlagSet("get", flag.ExitOnError)
-	dbPath := fs_.String("db", defaultDB(), "database file")
-	asJSON := fs_.Bool("json", false, "machine-readable output")
-	pos, err := parseInterleaved(fs_, args)
-	if err != nil {
-		return err
-	}
-	if len(pos) != 2 {
-		return fmt.Errorf("usage: tennis get <namespace> <id>")
-	}
-	db, err := open(*dbPath, true)
-	if err != nil {
-		return err
-	}
-	defer db.Close()
-	ctx := context.Background()
-	ns, err := db.Namespace(ctx, pos[0])
-	if err != nil {
-		return err
-	}
-	doc, err := ns.Get(ctx, pos[1])
-	if err != nil {
-		return err
-	}
-	if *asJSON {
-		return emit(doc)
-	}
-	fmt.Println(doc.Text)
-	return nil
-}
-
+// cmdRm deletes documents. The namespace is a flag here, matching add and
+// search, because rm is a document command — `tennis ns rm` is the one that
+// removes a namespace.
 func cmdRm(args []string) error {
 	fs_ := flag.NewFlagSet("rm", flag.ExitOnError)
 	dbPath := fs_.String("db", defaultDB(), "database file")
 	asJSON := fs_.Bool("json", false, "machine-readable output")
+	nsName := fs_.String("ns", "", "namespace (default "+defaultNamespace+", or $TENNIS_NS)")
 	pos, err := parseInterleaved(fs_, args)
 	if err != nil {
 		return err
 	}
-	if len(pos) < 2 {
-		return fmt.Errorf("usage: tennis rm <namespace> <id...>")
+	if len(pos) < 1 {
+		return fmt.Errorf("usage: tennis rm <id...> [--ns name]")
 	}
 	db, err := open(*dbPath, true)
 	if err != nil {
@@ -636,11 +706,24 @@ func cmdRm(args []string) error {
 	}
 	defer db.Close()
 	ctx := context.Background()
-	ns, err := db.Namespace(ctx, pos[0])
+
+	// rm used to take the namespace positionally. Left alone, the old spelling
+	// still runs — against the wrong namespace, deleting a document named
+	// after the right one. Since the tell is unambiguous (a bare first argument
+	// that is itself a namespace, with more arguments behind it), refuse rather
+	// than delete something nobody asked to delete.
+	if *nsName == "" && len(pos) > 1 {
+		if _, err := db.Namespace(ctx, pos[0]); err == nil {
+			return fmt.Errorf("rm takes ids, not a namespace: try `tennis rm %s --ns %s`",
+				strings.Join(pos[1:], " "), pos[0])
+		}
+	}
+
+	ns, err := db.Namespace(ctx, resolveNS(*nsName))
 	if err != nil {
 		return err
 	}
-	n, err := ns.Delete(ctx, pos[1:])
+	n, err := ns.Delete(ctx, pos)
 	if err != nil {
 		return err
 	}
@@ -702,17 +785,49 @@ func cmdNS(args []string) error {
 		fmt.Printf("created %q bound to %s\n", ns.Name(), ns.EmbedderID())
 		return nil
 
-	case "drop":
+	case "rm":
 		if len(pos) < 2 {
-			return fmt.Errorf("usage: tennis ns drop <name>")
+			return fmt.Errorf("usage: tennis ns rm <name>")
 		}
-		if err := db.DropNamespace(ctx, pos[1]); err != nil {
+		name := pos[1]
+
+		// A namespace is not an empty container being tidied away: it holds
+		// every document ever written to it, and dropping it takes all of them.
+		// The count is looked up first so the warning can name what is at
+		// stake while it is still at stake — said afterwards it is a receipt,
+		// not a warning.
+		infos, err := db.ListNamespaces(ctx)
+		if err != nil {
 			return err
 		}
-		fmt.Printf("dropped %q\n", pos[1])
+		var info tennis.NamespaceInfo
+		found := false
+		for _, i := range infos {
+			if i.Name == name {
+				info, found = i, true
+				break
+			}
+		}
+		if !found {
+			return fmt.Errorf("namespace %q: %w", name, tennis.ErrNamespaceNotFound)
+		}
+		if !*asJSON {
+			fmt.Fprintf(os.Stderr, "tennis: removing %q takes its %s (%s) with it\n",
+				name, plural(info.Documents, "document"), plural(info.Chunks, "chunk"))
+		}
+		if err := db.DropNamespace(ctx, name); err != nil {
+			return err
+		}
+		if *asJSON {
+			return emit(map[string]any{
+				"removed": name, "documents": info.Documents, "chunks": info.Chunks,
+			})
+		}
+		fmt.Printf("removed %q\n", name)
 		return nil
+
 	}
-	return fmt.Errorf("unknown subcommand %q (want list, create, drop)", sub)
+	return fmt.Errorf("unknown subcommand %q (want list, create, rm)", sub)
 }
 
 // parseWhere turns "status=merged,cost>5" into a filter. Deliberately tiny:

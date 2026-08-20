@@ -110,11 +110,11 @@ Supported operators are `=`, `!=`, `>`, `>=`, `<`, `<=`.
 
 Namespaces take letters, digits, dash, and underscore, up to 64 characters, and must start with a letter or digit. Attribute names additionally allow dots.
 
-## "N line(s) failed to parse" from put
+## "N line(s) failed to parse" from add --ndjson
 
 ```bash
-$ tennis put agents --json < events.ndjson
-tennis: put: line 3: unexpected end of JSON input
+$ tennis add --ndjson --ns agents --json < events.ndjson
+tennis: ndjson: line 3: unexpected end of JSON input
 {
   "chunks": 2,
   "failed": 1,
@@ -124,7 +124,7 @@ tennis: put: line 3: unexpected end of JSON input
 error: 1 line(s) failed to parse
 ```
 
-Bad lines are reported with their line number and skipped; the good ones are still written. `put` exits nonzero so a script notices. Each line needs `id` and `text`.
+Bad lines are reported with their line number and skipped; the good ones are still written. The command exits nonzero so a script notices. Each line needs `id` and `text`.
 
 ## Results are there, but bad
 
@@ -140,7 +140,7 @@ If keyword search finds nothing for Chinese, Japanese, or Korean text, that is a
 The database is one ordinary SQLite file, and the model cache is a directory:
 
 ```bash
-tennis ns drop notes          # one namespace
+tennis ns rm notes            # one namespace
 rm ~/.tennis/db.sqlite        # everything indexed
 rm -rf ~/.cache/tennis        # the downloaded model
 ```

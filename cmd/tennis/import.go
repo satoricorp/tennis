@@ -84,6 +84,11 @@ func cmdAdd(args []string) error {
 		formatCodex:      fs_.Bool(formatCodex, false, "read the source as Codex transcripts"),
 		formatFiles:      fs_.Bool(formatFiles, false, "read the source as plain files"),
 	}
+	// --ndjson is a source like the others but not a format like the others:
+	// it reads stdin rather than a path, and its documents are not
+	// conversations, so it never reaches the archive readers at all.
+	ndjson := fs_.Bool("ndjson", false, "read NDJSON documents from stdin, one per line")
+
 	pos, err := parseInterleaved(fs_, args)
 	if err != nil {
 		return err
@@ -106,8 +111,25 @@ func cmdAdd(args []string) error {
 		}
 		o.format = chosen[0]
 	}
+
+	if *ndjson {
+		if len(chosen) > 0 {
+			return fmt.Errorf("--ndjson and --%s name different sources; pick one", chosen[0])
+		}
+		if o.format != formatAuto {
+			return fmt.Errorf("--format %s contradicts --ndjson", o.format)
+		}
+		// "-" is the conventional spelling of stdin and costs nothing to
+		// accept. A real path is refused rather than read, because reading it
+		// would silently ignore the stdin the flag promises.
+		if len(pos) > 1 || (len(pos) == 1 && pos[0] != "-") {
+			return fmt.Errorf("--ndjson reads stdin; drop the path (or spell it \"-\")")
+		}
+		return runNDJSON(resolveNS(*nsName), o)
+	}
+
 	if len(pos) < 1 {
-		return fmt.Errorf("usage: tennis add [--chatgpt|--claude|--claude-code|--codex|--files] <path...>")
+		return fmt.Errorf("usage: tennis add [--chatgpt|--claude|--claude-code|--codex|--files|--ndjson] <path...>")
 	}
 	return runImport(resolveNS(*nsName), pos, o)
 }

@@ -13,9 +13,9 @@ import (
 	"github.com/satoricorp/tennis"
 )
 
-// TestParsePutDoc is the table test for the NDJSON contract itself: one
+// TestParseNDJSONDoc is the table test for the NDJSON contract itself: one
 // object per line, "id" and "text" required, "attributes" optional.
-func TestParsePutDoc(t *testing.T) {
+func TestParseNDJSONDoc(t *testing.T) {
 	cases := []struct {
 		name    string
 		line    string
@@ -65,7 +65,7 @@ func TestParsePutDoc(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			got, err := parsePutDoc([]byte(c.line))
+			got, err := parseNDJSONDoc([]byte(c.line))
 			if c.wantErr {
 				if err == nil {
 					t.Fatalf("expected an error, got doc %+v", got)
@@ -85,10 +85,10 @@ func TestParsePutDoc(t *testing.T) {
 	}
 }
 
-// TestReadPutDocsSkipsBadLinesAndKeepsGoing is the batch-level contract: a
+// TestReadNDJSONDocsSkipsBadLinesAndKeepsGoing is the batch-level contract: a
 // malformed line costs that line, not the run, and is reported with its
 // 1-based line number.
-func TestReadPutDocsSkipsBadLinesAndKeepsGoing(t *testing.T) {
+func TestReadNDJSONDocsSkipsBadLinesAndKeepsGoing(t *testing.T) {
 	input := strings.Join([]string{
 		`{"id":"a1","text":"one"}`,
 		``, // blank line: skipped silently, not a failure
@@ -98,7 +98,7 @@ func TestReadPutDocsSkipsBadLinesAndKeepsGoing(t *testing.T) {
 	}, "\n")
 
 	var errOut bytes.Buffer
-	docs, failed := readPutDocs(strings.NewReader(input), &errOut)
+	docs, failed := readNDJSONDocs(strings.NewReader(input), &errOut)
 
 	if len(docs) != 2 || docs[0].ID != "a1" || docs[1].ID != "a2" {
 		t.Fatalf("docs: got %+v, want [a1 a2]", docs)
@@ -115,10 +115,10 @@ func TestReadPutDocsSkipsBadLinesAndKeepsGoing(t *testing.T) {
 	}
 }
 
-func TestReadPutDocsAllGood(t *testing.T) {
+func TestReadNDJSONDocsAllGood(t *testing.T) {
 	input := `{"id":"a1","text":"one"}` + "\n" + `{"id":"a2","text":"two","attributes":{"k":"v"}}` + "\n"
 	var errOut bytes.Buffer
-	docs, failed := readPutDocs(strings.NewReader(input), &errOut)
+	docs, failed := readNDJSONDocs(strings.NewReader(input), &errOut)
 	if failed != 0 {
 		t.Errorf("failed: got %d, want 0 (stderr: %s)", failed, errOut.String())
 	}
@@ -127,19 +127,19 @@ func TestReadPutDocsAllGood(t *testing.T) {
 	}
 }
 
-func TestReadPutDocsEmptyInput(t *testing.T) {
+func TestReadNDJSONDocsEmptyInput(t *testing.T) {
 	var errOut bytes.Buffer
-	docs, failed := readPutDocs(strings.NewReader(""), &errOut)
+	docs, failed := readNDJSONDocs(strings.NewReader(""), &errOut)
 	if failed != 0 || len(docs) != 0 {
 		t.Errorf("empty input: got docs=%v failed=%d, want none", docs, failed)
 	}
 }
 
-// --- CLI-level integration tests, exercising cmdPut and cmdMatch exactly as
+// --- CLI-level integration tests, exercising cmdAdd --ndjson and cmdMatch exactly as
 // the binary would run them. These need the embedding model, so they skip
 // cleanly (like the rest of the suite) when the 123MB weights are absent.
 
-func putTestCache(t *testing.T) string {
+func ndjsonTestCache(t *testing.T) string {
 	t.Helper()
 	cache, err := filepath.Abs("../../testdata/cache")
 	if err != nil {
@@ -152,7 +152,7 @@ func putTestCache(t *testing.T) string {
 }
 
 // withStdin replaces os.Stdin for the duration of the test with a pipe fed
-// from data, restoring the original on cleanup. cmdPut reads os.Stdin
+// from data, restoring the original on cleanup. add --ndjson reads os.Stdin
 // directly, the same way the real binary does, so this exercises the actual
 // wiring rather than a stand-in.
 func withStdin(t *testing.T, data string) {
@@ -193,8 +193,8 @@ func captureStdout(t *testing.T, fn func() error) (string, error) {
 	return buf.String(), runErr
 }
 
-func TestPutEndToEnd(t *testing.T) {
-	cache := putTestCache(t)
+func TestAddNDJSONEndToEnd(t *testing.T) {
+	cache := ndjsonTestCache(t)
 	t.Setenv("TENNIS_CACHE", cache)
 	t.Setenv("TENNIS_CARDS", t.TempDir())
 	dbPath := filepath.Join(t.TempDir(), "put.sqlite")
@@ -208,12 +208,12 @@ func TestPutEndToEnd(t *testing.T) {
 
 	withStdin(t, batch)
 	out, err := captureStdout(t, func() error {
-		return cmdPut([]string{"--db", dbPath, "--json", ns})
+		return cmdAdd([]string{"--db", dbPath, "--json", "--ndjson", "--ns", ns})
 	})
 	if err != nil {
 		t.Fatalf("put: %v\noutput: %s", err, out)
 	}
-	res := decodePutResult(t, out)
+	res := decodeNDJSONResult(t, out)
 	if res["written"] != float64(2) || res["skipped"] != float64(0) || res["failed"] != float64(0) {
 		t.Fatalf("first put: want written=2 skipped=0 failed=0, got %v", res)
 	}
@@ -221,12 +221,12 @@ func TestPutEndToEnd(t *testing.T) {
 	// Unchanged-skip: re-running the identical batch must write nothing.
 	withStdin(t, batch)
 	out, err = captureStdout(t, func() error {
-		return cmdPut([]string{"--db", dbPath, "--json", ns})
+		return cmdAdd([]string{"--db", dbPath, "--json", "--ndjson", "--ns", ns})
 	})
 	if err != nil {
 		t.Fatalf("put (repeat): %v\noutput: %s", err, out)
 	}
-	res = decodePutResult(t, out)
+	res = decodeNDJSONResult(t, out)
 	if res["written"] != float64(0) || res["skipped"] != float64(2) {
 		t.Errorf("repeat put: want written=0 skipped=2, got %v", res)
 	}
@@ -235,12 +235,12 @@ func TestPutEndToEnd(t *testing.T) {
 	// skipped, and must replace rather than duplicate.
 	withStdin(t, `{"id":"e1","text":"the deploy failed with a DIFFERENT timeout","attributes":{"kind":"event","session":"s1"}}`+"\n")
 	out, err = captureStdout(t, func() error {
-		return cmdPut([]string{"--db", dbPath, "--json", ns})
+		return cmdAdd([]string{"--db", dbPath, "--json", "--ndjson", "--ns", ns})
 	})
 	if err != nil {
 		t.Fatalf("put (upsert): %v\noutput: %s", err, out)
 	}
-	res = decodePutResult(t, out)
+	res = decodeNDJSONResult(t, out)
 	if res["written"] != float64(1) || res["skipped"] != float64(0) {
 		t.Errorf("upsert put: want written=1 skipped=0, got %v", res)
 	}
@@ -255,12 +255,12 @@ func TestPutEndToEnd(t *testing.T) {
 	}, "\n") + "\n"
 	withStdin(t, mixed)
 	out, err = captureStdout(t, func() error {
-		return cmdPut([]string{"--db", dbPath, "--json", ns})
+		return cmdAdd([]string{"--db", dbPath, "--json", "--ndjson", "--ns", ns})
 	})
 	if err == nil {
 		t.Fatal("expected a nonzero-exit error when some lines fail to parse")
 	}
-	res = decodePutResult(t, out)
+	res = decodeNDJSONResult(t, out)
 	if res["written"] != float64(2) {
 		t.Errorf("partial batch: want written=2 (the good lines), got %v", res)
 	}
@@ -299,7 +299,7 @@ func TestPutEndToEnd(t *testing.T) {
 	}
 }
 
-func decodePutResult(t *testing.T, out string) map[string]any {
+func decodeNDJSONResult(t *testing.T, out string) map[string]any {
 	t.Helper()
 	var res map[string]any
 	if err := json.Unmarshal([]byte(out), &res); err != nil {

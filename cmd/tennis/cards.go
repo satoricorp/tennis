@@ -15,7 +15,7 @@ import (
 )
 
 // A card is a readable markdown summary of one conversation, written to
-// ~/tennis/sessions as it is imported.
+// ~/tennis as it is imported.
 //
 // tennis writes cards and never reads them back. The documents in SQLite are
 // the record; a card is a rendering of one. That one-way rule is what makes
@@ -72,7 +72,6 @@ func newCardWriter(ctx context.Context, dir string, sum summarize.Summarizer) (*
 	if err != nil {
 		return nil, err
 	}
-	expanded = filepath.Join(expanded, "sessions")
 	if err := os.MkdirAll(expanded, 0o755); err != nil {
 		return nil, err
 	}

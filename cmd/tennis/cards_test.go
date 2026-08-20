@@ -153,11 +153,11 @@ func TestCardWriterDegradesOnSummaryFailure(t *testing.T) {
 	if w.failed != 1 {
 		t.Errorf("counted %d summary failures, want 1", w.failed)
 	}
-	entries, _ := os.ReadDir(filepath.Join(dir, "sessions"))
+	entries, _ := os.ReadDir(dir)
 	if len(entries) != 1 {
 		t.Fatalf("found %d cards on disk, want 1", len(entries))
 	}
-	body, _ := os.ReadFile(filepath.Join(dir, "sessions", entries[0].Name()))
+	body, _ := os.ReadFile(filepath.Join(dir, entries[0].Name()))
 	if !strings.Contains(string(body), "how do I rotate the signing key") {
 		t.Errorf("card did not fall back to the opening message:\n%s", body)
 	}

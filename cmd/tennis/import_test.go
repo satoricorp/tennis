@@ -512,7 +512,7 @@ func TestNormalizeTime(t *testing.T) {
 // SQLite, attributes back out of match --json. Needs the embedding model, so
 // it skips cleanly when the weights are absent, like the rest of the suite.
 func TestImportEndToEnd(t *testing.T) {
-	cache := putTestCache(t)
+	cache := ndjsonTestCache(t)
 	t.Setenv("TENNIS_CACHE", cache)
 	t.Setenv("TENNIS_CARDS", t.TempDir())
 	dbPath := filepath.Join(t.TempDir(), "import.sqlite")
@@ -601,7 +601,7 @@ func decodeImportResult(t *testing.T, out string) map[string]any {
 // namespace, then ask a question without naming one, and get the answer back.
 // If these ever diverge, the demo on the front page searches an empty index.
 func TestAddAndSearchDefaultNamespace(t *testing.T) {
-	cache := putTestCache(t)
+	cache := ndjsonTestCache(t)
 	t.Setenv("TENNIS_CACHE", cache)
 	t.Setenv("TENNIS_CARDS", t.TempDir())
 	t.Setenv("TENNIS_NS", "")

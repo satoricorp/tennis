@@ -69,7 +69,7 @@ To change models, create a new namespace and re-index it:
 ```bash
 tennis ns create notes-v2 --openai text-embedding-3-small
 tennis add ~/Documents/notes --ns notes-v2
-tennis ns drop notes
+tennis ns rm notes
 ```
 
 That is a real cost, and it is meant to be — it makes the expensive operation visible instead of letting it happen by accident.

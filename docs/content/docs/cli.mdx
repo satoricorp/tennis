@@ -113,26 +113,26 @@ That is `--mode keyword` doing its job: no document contains those words. The de
 
 `keyword_rank: 0` means BM25 did not return this document at all — the ranks are 1-based, and `0` is "absent", not "first".
 
-## tennis put
+## tennis add --ndjson
 
-`add` walks a directory; `put` is for content that never touched disk — event lines, chat turns, agent claims, anything a program produces rather than a file. It reads newline-delimited JSON from stdin, one document per line:
+Every other source names a path; `--ndjson` is for content that never touched disk — event lines, chat turns, agent claims, anything a program produces rather than a file. It reads newline-delimited JSON from stdin, one document per line:
 
 ```bash
 echo '{"id": "e1", "text": "deploy failed with a connection timeout", "attributes": {"kind": "event"}}' \
-  | tennis put agents
+  | tennis add --ndjson --ns agents
 
-tennis put agents < events.ndjson
-tennis put agents --openai text-embedding-3-small < events.ndjson
-tennis put agents --json < events.ndjson
+tennis add --ndjson --ns agents < events.ndjson
+tennis add --ndjson --ns agents --openai text-embedding-3-small < events.ndjson
+tennis add --ndjson --ns agents --json < events.ndjson
 ```
 
-Each line is `{"id": "...", "text": "...", "attributes": {...}}`. `attributes` is optional; everything else follows `add`, including creating the namespace on first use and skipping documents that are byte-identical to what is stored.
+Each line is `{"id": "...", "text": "...", "attributes": {...}}`. `attributes` is optional; everything else follows the rest of `add`, including creating the namespace on first use and skipping documents that are byte-identical to what is stored. Cards are not written for these documents — they are not conversations, so there is nothing to summarize.
 
-A line that isn't valid JSON, or is missing `id` or `text`, is reported to stderr with its line number and does not stop the batch. `put` exits nonzero if any line failed:
+A line that isn't valid JSON, or is missing `id` or `text`, is reported to stderr with its line number and does not stop the batch. The command exits nonzero if any line failed:
 
 ```bash
-$ tennis put agents --json < events.ndjson
-tennis: put: line 3: unexpected end of JSON input
+$ tennis add --ndjson --ns agents --json < events.ndjson
+tennis: ndjson: line 3: unexpected end of JSON input
 {
   "chunks": 2,
   "failed": 1,
@@ -148,7 +148,7 @@ error: 1 line(s) failed to parse
 tennis ns list
 tennis ns create agents                               # built-in model
 tennis ns create agents --openai text-embedding-3-small
-tennis ns drop agents
+tennis ns rm agents
 ```
 
 ```bash
@@ -160,27 +160,29 @@ context              builtin:potion-retrieval-32M          512        3        3
 
 The embedder column is not decoration — it is the binding a namespace is stuck with for life. See [Embedders](/embedders#how-the-binding-is-enforced).
 
-## tennis get, rm, serve
+`ns rm` removes the namespace and every document written to it. It names the cost before paying it:
 
 ```bash
-tennis get notes /abs/path/to/auth.md          # print a stored document
-tennis get agents e1 --json                    # with its attributes
-tennis rm notes /abs/path/to/auth.md           # delete documents
-tennis serve                                   # local HTTP API on 127.0.0.1:8817
-tennis serve --addr 127.0.0.1:9000
-tennis version
+$ tennis ns rm agents
+tennis: removing "agents" takes its 2 documents (2 chunks) with it
+removed "agents"
 ```
 
+## tennis rm, serve, version
+
 ```bash
-$ tennis get agents e1 --json
-{
-  "id": "e1",
-  "text": "deploy failed with a connection timeout",
-  "attributes": {
-    "kind": "event",
-    "session": "s1"
-  }
-}
+tennis rm /abs/path/to/auth.md                 # delete from the default namespace
+tennis rm e1 e2 --ns agents                    # ...or from a named one
+tennis serve                                   # local HTTP API on 127.0.0.1:8817
+tennis serve --addr 127.0.0.1:9000
+tennis version                                 # tag and the commit it was built from
+```
+
+`rm` takes document ids and reads `--ns` like `add` and `search` do; `tennis ns rm` is the one that removes a whole namespace.
+
+```bash
+$ tennis version
+tennis v0.2.0 (b489e77ca87b)
 ```
 
 `serve` is documented in full under [HTTP API](/http-api).
@@ -195,7 +197,7 @@ $ tennis get agents e1 --json
 
 ## Naming the namespace positionally
 
-`add` and `search` take the namespace as a flag so that the common case needs no namespace at all. Three older commands take it as the first argument instead, and still work:
+`add`, `search` and `rm` take the namespace as a flag so that the common case needs no namespace at all. Three older commands take it as the first argument instead, and still work:
 
 ```bash
 tennis seed notes ./docs                       # like tennis add --files ./docs --ns notes
@@ -203,4 +205,3 @@ tennis import history ~/Downloads/export.zip   # like tennis add ~/Downloads/exp
 tennis match notes "keep me signed in"         # like tennis search "keep me signed in" --ns notes
 ```
 
-`put`, `get`, and `rm` name the namespace positionally too.

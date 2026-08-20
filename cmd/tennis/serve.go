@@ -156,7 +156,7 @@ func newServeMux(db *tennis.DB) http.Handler {
 		respond(w, map[string]int{"deleted": n}, err)
 	})
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) {
-		respond(w, map[string]string{"status": "ok", "version": version, "db": db.Path()}, nil)
+		respond(w, map[string]string{"status": "ok", "version": buildVersion(), "db": db.Path()}, nil)
 	})
 
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

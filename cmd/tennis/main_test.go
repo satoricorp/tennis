@@ -303,3 +303,62 @@ func TestRenderResultsNumbering(t *testing.T) {
 		}
 	})
 }
+
+// listsCommand reports whether the help screen has a line whose first word is
+// name — a plain substring check would match "--ns <name>" when looking for
+// the ns command, and "import" inside a sentence about importing.
+func listsCommand(help, name string) bool {
+	for _, line := range strings.Split(help, "\n") {
+		if fields := strings.Fields(line); len(fields) > 0 && fields[0] == name {
+			return true
+		}
+	}
+	return false
+}
+
+// TestHelpTextHidesAndReveals pins the two screens apart. The short one is the
+// commands a person should reach for; the long one is everything that still
+// works. Getting this backwards is silent — the command runs either way — so
+// the split is worth a test rather than a convention.
+func TestHelpTextHidesAndReveals(t *testing.T) {
+	short, long := helpText(false), helpText(true)
+
+	for _, cmd := range []string{"add", "search", "ls", "rm", "ns", "version"} {
+		if !listsCommand(short, cmd) {
+			t.Errorf("default help does not list %q", cmd)
+		}
+		if !listsCommand(long, cmd) {
+			t.Errorf("--agents help does not list %q", cmd)
+		}
+	}
+	for _, cmd := range []string{"serve", "seed", "import", "match"} {
+		if listsCommand(short, cmd) {
+			t.Errorf("default help advertises %q, which is meant to be hidden", cmd)
+		}
+		if !listsCommand(long, cmd) {
+			t.Errorf("--agents help does not list %q", cmd)
+		}
+	}
+	// Hidden is not the same as undiscoverable: an agent has to be able to
+	// find the long screen from the short one.
+	if !strings.Contains(short, "--agents") {
+		t.Error("default help does not say how to reach the full surface")
+	}
+}
+
+func TestWantsAgents(t *testing.T) {
+	for _, c := range []struct {
+		args []string
+		want bool
+	}{
+		{nil, false},
+		{[]string{"--agents"}, true},
+		{[]string{"-agents"}, true},
+		{[]string{"search", "--agents"}, true},
+		{[]string{"--json"}, false},
+	} {
+		if got := wantsAgents(c.args); got != c.want {
+			t.Errorf("wantsAgents(%q) = %v, want %v", c.args, got, c.want)
+		}
+	}
+}

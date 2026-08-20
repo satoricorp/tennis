@@ -157,26 +157,26 @@ Re-running `add` is an incremental update, and re-adding the same source is free
 
 Two things are deliberately left out of session imports. Local transcripts are indexed from their text and thinking, not their tool calls and tool results — those are mostly whole file reads and command output, and letting them in would mean every search ranked file contents above what was said about them. A Codex rollout records each exchange twice, once as raw model traffic carrying the harness preamble and once as the events the interface showed; tennis reads the second, because what you remember saying is what you typed. ChatGPT messages the exporter marked as hidden are skipped for the same reason: they were never on screen.
 
-### `put` — ingest documents that aren't files
+### `add --ndjson` — ingest documents that aren't files
 
-`add` walks a directory; `put` is for content that never touched disk — event lines, chat turns, agent claims, anything a program produces rather than a file. It reads newline-delimited JSON from stdin, one document per line:
+Every other source names a path; `--ndjson` is for content that never touched disk — event lines, chat turns, agent claims, anything a program produces rather than a file. It reads newline-delimited JSON from stdin, one document per line:
 
 ```bash
 echo '{"id": "e1", "text": "deploy failed with a connection timeout", "attributes": {"kind": "event", "session": "s1"}}' \
-  | tennis put agents
+  | tennis add --ndjson --ns agents
 
-tennis put agents < events.ndjson                     # a whole batch at once
-tennis put agents --openai text-embedding-3-small < events.ndjson
-tennis put agents --json < events.ndjson               # machine-readable
+tennis add --ndjson --ns agents < events.ndjson        # a whole batch at once
+tennis add --ndjson --ns agents --openai text-embedding-3-small < events.ndjson
+tennis add --ndjson --ns agents --json < events.ndjson # machine-readable
 ```
 
-Each line is `{"id": "...", "text": "...", "attributes": {...}}` — `attributes` is optional, everything else follows `add`: the namespace is created on first use bound to the builtin model (or `--openai <model>`), and a document whose text and attributes are byte-identical to what's stored is skipped rather than re-embedded.
+Each line is `{"id": "...", "text": "...", "attributes": {...}}` — `attributes` is optional, everything else follows the rest of `add`: the namespace is created on first use bound to the builtin model (or `--openai <model>`), and a document whose text and attributes are byte-identical to what's stored is skipped rather than re-embedded. No cards are written, because these documents are not conversations.
 
-A line that isn't valid JSON, or is missing `id` or `text`, is reported to stderr with its line number and does not stop the batch; `put` exits nonzero if any line failed.
+A line that isn't valid JSON, or is missing `id` or `text`, is reported to stderr with its line number and does not stop the batch; the command exits nonzero if any line failed.
 
 ```
-$ tennis put agents --json < events.ndjson
-tennis: put: line 14: missing "id"
+$ tennis add --ndjson --ns agents --json < events.ndjson
+tennis: ndjson: line 14: missing "id"
 {"written": 40, "skipped": 3, "chunks": 51, "failed": 1}
 ```
 
@@ -208,15 +208,13 @@ tennis search "auth" --json                        # full results with scores an
 ]
 ```
 
-`tennis get notes <id> --json` includes the same `attributes` field.
-
 ### `ns` — namespaces
 
 ```bash
 tennis ns list
 tennis ns create agents                               # built-in model
 tennis ns create agents --openai text-embedding-3-small
-tennis ns drop agents
+tennis ns rm agents                                   # and every document in it
 ```
 
 ```
@@ -226,11 +224,20 @@ notes                builtin:potion-retrieval-32M            512      412     19
 agents               openai:text-embedding-3-small          1536       88      340
 ```
 
-### `get`, `rm`, `serve`
+`ns rm` removes the namespace and everything written to it. It says what that
+costs before it does it:
+
+```
+$ tennis ns rm agents
+tennis: removing "agents" takes its 88 documents (340 chunks) with it
+removed "agents"
+```
+
+### `rm`, `serve`
 
 ```bash
-tennis get notes /abs/path/to/auth.md          # print a stored document
-tennis rm notes /abs/path/to/auth.md           # delete documents
+tennis rm /abs/path/to/auth.md                 # delete documents from the default namespace
+tennis rm e1 e2 --ns agents                    # ...or from a named one
 tennis serve                                   # local HTTP API on 127.0.0.1:8817
 ```
 
@@ -239,7 +246,7 @@ tennis serve                                   # local HTTP API on 127.0.0.1:881
 | Flag | Meaning |
 |---|---|
 | `--db <path>` | database file (default `~/.tennis/db.sqlite`, or `$TENNIS_DB`) |
-| `--ns <name>` | namespace for `add` and `search` (default `context`, or `$TENNIS_NS`) |
+| `--ns <name>` | namespace for `add`, `search` and `rm` (default `context`, or `$TENNIS_NS`) |
 | `--json` | machine-readable output on stdout; progress goes to stderr |
 | `-k <n>` | how many results (`search` only, default 1; `-n` is an alias) |
 | `--mode` | `hybrid` (default), `keyword`, `semantic` |
