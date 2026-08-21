@@ -101,7 +101,7 @@ func wantsAgents(args []string) bool {
 func main() {
 	if len(os.Args) < 2 {
 		writeLogo(os.Stderr)
-		fmt.Fprint(os.Stderr, helpText(false))
+		fmt.Fprint(os.Stderr, colorizeHelp(helpText(false), newStyler(os.Stderr)))
 		os.Exit(2)
 	}
 	cmd := os.Args[1]
@@ -137,15 +137,15 @@ func main() {
 			break
 		}
 		writeLogo(os.Stdout)
-		fmt.Print(helpText(false))
+		fmt.Print(colorizeHelp(helpText(false), newStyler(os.Stdout)))
 	case "--agents", "-agents":
 		fmt.Print(helpText(true))
 	default:
-		fmt.Fprintf(os.Stderr, "unknown command %q\n\n%s", cmd, helpText(false))
+		fmt.Fprintf(os.Stderr, "unknown command %q\n\n%s", cmd, colorizeHelp(helpText(false), newStyler(os.Stderr)))
 		os.Exit(2)
 	}
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "error:", err)
+		fmt.Fprintln(os.Stderr, newStyler(os.Stderr).red("error:"), err)
 		os.Exit(1)
 	}
 }
@@ -512,18 +512,21 @@ func runSearch(nsName, query string, o searchOpts) error {
 		return nil
 	}
 
-	renderResults(os.Stdout, results, textWidth())
+	renderResults(os.Stdout, results, textWidth(), newStyler(os.Stdout))
 	return nil
 }
 
-// renderResults writes the human-readable form of a result set.
-func renderResults(w io.Writer, results []tennis.Result, width int) {
+// renderResults writes the human-readable form of a result set. The styling
+// keeps to the parts a reader consults rather than reads: the citation and
+// ranker tags recede, the rank numbers take the accent, and the words — the
+// thing being searched for — stay exactly the terminal's own color.
+func renderResults(w io.Writer, results []tennis.Result, width int, st styler) {
 	// One result is an answer, not a list of one: there is no rank to compare
 	// it against, so it is printed as the words and where they came from.
 	if len(results) == 1 {
 		top := results[0]
 		fmt.Fprintln(w, wrap(top.Text, width, "> ", "  "))
-		fmt.Fprintf(w, "\n  %s\n", citation(top))
+		fmt.Fprintf(w, "\n  %s\n", st.dim(citation(top)))
 		return
 	}
 
@@ -534,7 +537,7 @@ func renderResults(w io.Writer, results []tennis.Result, width int) {
 		if i > 0 {
 			fmt.Fprintln(w)
 		}
-		fmt.Fprintf(w, "%2d. %s  [%s]\n", i+1, citation(r), rankers(r))
+		fmt.Fprintf(w, "%s %s  %s\n", st.ball(fmt.Sprintf("%2d.", i+1)), citation(r), st.dim("["+rankers(r)+"]"))
 		fmt.Fprintln(w, wrap(r.Text, width, "    ", "    "))
 	}
 }
@@ -768,7 +771,8 @@ func cmdNS(args []string) error {
 			fmt.Println("no namespaces yet — try: tennis seed notes ./docs")
 			return nil
 		}
-		fmt.Printf("%-20s %-34s %6s %8s %8s\n", "NAMESPACE", "EMBEDDER", "DIMS", "DOCS", "CHUNKS")
+		st := newStyler(os.Stdout)
+		fmt.Println(st.dim(fmt.Sprintf("%-20s %-34s %6s %8s %8s", "NAMESPACE", "EMBEDDER", "DIMS", "DOCS", "CHUNKS")))
 		for _, i := range infos {
 			fmt.Printf("%-20s %-34s %6d %8d %8d\n", i.Name, i.EmbedderID, i.Dims, i.Documents, i.Chunks)
 		}

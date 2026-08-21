@@ -83,7 +83,9 @@ func listSessions(ctx context.Context, ns *tennis.Namespace, opts tennis.ListOpt
 		return nil
 	}
 
-	fmt.Printf("%-16s %-12s %6s  %s\n", "DATE", "SOURCE", "DOCS", "TITLE")
+	// The header is dimmed, not the data: the rows are what was asked for,
+	// and the column names only need to be there when consulted.
+	fmt.Println(newStyler(os.Stdout).dim(fmt.Sprintf("%-16s %-12s %6s  %s", "DATE", "SOURCE", "DOCS", "TITLE")))
 	for _, g := range groups {
 		title := attrString(g.Attributes, "title")
 		if title == "" {
@@ -116,7 +118,7 @@ func listDocuments(ctx context.Context, ns *tennis.Namespace, opts tennis.ListOp
 		return nil
 	}
 
-	fmt.Printf("%-16s %-12s %-8s %6s  %s\n", "DATE", "SOURCE", "KIND", "CHUNKS", "ID")
+	fmt.Println(newStyler(os.Stdout).dim(fmt.Sprintf("%-16s %-12s %-8s %6s  %s", "DATE", "SOURCE", "KIND", "CHUNKS", "ID")))
 	for _, info := range infos {
 		fmt.Printf("%-16s %-12s %-8s %6d  %s\n",
 			attrDate(info.Attributes, opts.SortBy),
@@ -134,11 +136,12 @@ func listDocuments(ctx context.Context, ns *tennis.Namespace, opts tennis.ListOp
 }
 
 func printTally(shown, total int, what string) {
+	st := newStyler(os.Stderr)
 	if total > shown {
-		fmt.Fprintf(os.Stderr, "\n%d of %d %s (--offset %d for more, -n 0 for all)\n", shown, total, what, shown)
+		fmt.Fprintf(os.Stderr, "\n%s\n", st.dim(fmt.Sprintf("%d of %d %s (--offset %d for more, -n 0 for all)", shown, total, what, shown)))
 		return
 	}
-	fmt.Fprintf(os.Stderr, "\n%d %s\n", total, what)
+	fmt.Fprintf(os.Stderr, "\n%s\n", st.dim(fmt.Sprintf("%d %s", total, what)))
 }
 
 func attrString(attrs map[string]any, key string) string {

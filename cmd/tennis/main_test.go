@@ -272,7 +272,7 @@ func TestRenderResultsNumbering(t *testing.T) {
 
 	t.Run("one result is an answer, not a list of one", func(t *testing.T) {
 		var b strings.Builder
-		renderResults(&b, []tennis.Result{r("alpha", 1, 1)}, 60)
+		renderResults(&b, []tennis.Result{r("alpha", 1, 1)}, 60, styler{})
 		got := b.String()
 		if !strings.HasPrefix(got, "> alpha") {
 			t.Errorf("want the answer form, got:\n%s", got)
@@ -284,7 +284,7 @@ func TestRenderResultsNumbering(t *testing.T) {
 
 	t.Run("many results are numbered from one", func(t *testing.T) {
 		var b strings.Builder
-		renderResults(&b, []tennis.Result{r("alpha", 1, 1), r("beta", 2, 2)}, 60)
+		renderResults(&b, []tennis.Result{r("alpha", 1, 1), r("beta", 2, 2)}, 60, styler{})
 		got := b.String()
 		// The regression this guards: the list used to start at 2, under an
 		// unnumbered top result, and read as though item 1 had gone missing.

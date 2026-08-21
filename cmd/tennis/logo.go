@@ -53,10 +53,57 @@ func writeLogo(f *os.File) {
 	if !logoFits(f) {
 		return
 	}
+	st := newStyler(f)
 	for _, line := range logoLines() {
-		fmt.Fprintln(f, line)
+		fmt.Fprintln(f, colorizeLogo(line, st))
 	}
 	fmt.Fprintln(f)
+}
+
+// colorizeLogo paints one line of the mark: the strokes in ball green, the
+// box-drawing in the faint gray a shadow deserves. Painting run by run rather
+// than rune by rune keeps the escape bytes proportional to the shape's edges,
+// not its area.
+func colorizeLogo(line string, st styler) string {
+	if st.level == colorOff {
+		return line
+	}
+	var b strings.Builder
+	runes := []rune(line)
+	for i := 0; i < len(runes); {
+		j := i
+		class := logoClass(runes[i])
+		for j < len(runes) && logoClass(runes[j]) == class {
+			j++
+		}
+		run := string(runes[i:j])
+		switch class {
+		case logoSpace:
+			b.WriteString(run)
+		case logoStroke:
+			b.WriteString(st.ball(run))
+		case logoShadow:
+			b.WriteString(st.dim(run))
+		}
+		i = j
+	}
+	return b.String()
+}
+
+const (
+	logoSpace = iota
+	logoStroke
+	logoShadow
+)
+
+func logoClass(r rune) int {
+	switch r {
+	case ' ':
+		return logoSpace
+	case '█':
+		return logoStroke
+	}
+	return logoShadow
 }
 
 // logoFits reports whether f is a terminal that can show the mark.
