@@ -199,12 +199,12 @@ A folder add reads every file that holds text, each by whatever reads its kind:
 - **Plain text of any kind**, whatever the extension: notes, code, JSON, CSV, a `Makefile`.
 - **Spreadsheets, Word, PowerPoint, HTML and EPUB** (`.xlsx`, `.docx`, `.pptx`, `.html`, `.epub`) are read by Tennis itself: a workbook sheet by sheet with its dates as dates, a deck slide by slide, a book chapter by chapter in reading order.
 - **PDFs** are read with `pdftotext` when it is installed, and otherwise, on a Mac, through Spotlight.
-- **RTF, `.doc`, `.xls`, `.ppt`, Pages, Numbers, Keynote and email** are read through macOS.
+- **RTF, `.doc`, `.xls`, `.ppt`, Pages, Numbers, Keynote and email** are read through macOS. A Pages, Numbers or Keynote document saved as a package — a folder macOS shows as one file — and an `.rtfd` are each read as the one document they are, not walked into.
 
 The rest is passed over:
 
-- **Photos, audio, video, archives, dotfiles**, and anything under a dot directory such as `.git` are skipped silently. A folder of photos is not a folder of mistakes.
-- **Dependency and build folders** — `node_modules`, `vendor`, `target`, `dist`, `build`, `__pycache__` and `site-packages`, wherever they appear — and whatever a `.gitignore` inside the folder names are skipped silently too, but counted: the summary line ends `(N folders passed over)`. The folder you name is read whatever it is called, so `tennis add ./vendor` reads it.
+- **Photos, audio, video, archives, dotfiles**, and anything under a dot directory such as `.git` are skipped silently. A folder of photos is not a folder of mistakes. So are empty files and files holding nothing but whitespace.
+- **Dependency and build folders** — `node_modules`, `vendor`, `target`, `dist`, `build`, `__pycache__` and `site-packages`, wherever they appear — and whatever a `.gitignore` inside the folder names are skipped silently too, but counted: the summary line ends `(N folders passed over)`. The folder you name is read whatever it is called, so `tennis add ./vendor` reads it. On a Mac, `.gitignore` patterns match without regard to case, as git does there by default. Application bundles (`.app`, `.framework`) are passed over and counted the same way, and so is a symbolic link to a folder, which is not followed; a link to a file is read as that file.
 - **Other binary files, and text over 10MB**, are skipped with a note on stderr. Binary detection is a NUL-byte check in the leading 8KB, the same heuristic git uses.
 - **Formats with no reader on this machine** — a PDF on Linux without `pdftotext`, or a Pages file anywhere but a Mac — are skipped with a "no reader on this machine" note that says what is missing.
 
@@ -361,7 +361,47 @@ The token refresh window is shorter than the test's sleep, so the second request
 I widened the window and added a regression test.
 ```
 
-A conversation is printed in turn order under its title, with back-to-back turns from one speaker merged — the same rendering the summarizer reads. A filter that matches several sessions prints each one whole, one after another, never interleaved. `--json` returns the matching documents as `[{"id", "text", "attributes"}]` in the same order. `-k` caps how many documents print, but only when you pass it; the default of 1 is for ranked results. A filter that matches nothing prints `no matches`, and `search` with neither a query nor a filter is still a usage error.
+A conversation is printed in turn order under its title, with back-to-back turns from one speaker merged — the same rendering the summarizer reads. A Claude Code session that ran subagents prints its own thread first, then each subagent's turns under a heading of their own:
+
+```bash
+$ tennis search --where session=7f3a2c10
+# Flaky auth test
+
+## user
+
+The auth test fails about one run in five. Can you find out why?
+
+## assistant
+
+The token refresh window is shorter than the test's sleep. I widened it and added a regression test.
+
+## subagent agent-search
+
+## user/subagent
+
+Find every caller of refreshToken.
+
+## assistant/subagent
+
+Three callers: auth/session.go, auth/middleware.go, and the test helper.
+```
+
+A filter that matches several sessions or files prints each one whole, oldest first, never interleaved, and heads each so you can tell where one ends: a file with `==> <path> <==`, the way `head` heads one of several files, and a session with its title, or its source and id when it has none.
+
+```bash
+$ tennis search --where kind=file
+==> /Users/you/Documents/notes/auth.md <==
+# Session handling
+
+The session cookie is set with an expiry so the browser keeps it after the tab closes.
+
+==> /Users/you/Documents/notes/config.md <==
+# Configuration
+
+Values from the TOML file are merged over the defaults.
+```
+
+One match prints with no such heading, which is what a card's command asks for. `--json` returns the matching documents as `[{"id", "text", "attributes"}]` in the same order. `-k` caps how many documents print, but only when you pass it — the default of 1 is for ranked results — and `-k 0` prints them all. `--mode keyword` or `--mode semantic` with no query is an error, since there is nothing to rank. A filter that matches nothing prints `no matches`, and `search` with neither a query nor a filter is still a usage error.
 
 ## tennis ls
 
@@ -614,7 +654,9 @@ Claude Code and Codex are kinder: they keep their transcripts on your disk alrea
 Detection reads the source rather than the filename:
 
 - **ChatGPT vs Claude exports** are told apart by the shape of their `conversations.json`.
-- **Claude Code vs Codex transcripts** are told apart by the fields on each line of their `.jsonl` — Claude Code writes a `uuid` and `sessionId`, Codex wraps everything in a `{timestamp, type, payload}` envelope.
+- **Claude Code vs Codex transcripts** are told apart by the fields on each line of their `.jsonl` — Claude Code writes turns with a `uuid`, a `sessionId` and a `message`, Codex wraps everything in a `{timestamp, type, payload}` envelope.
+
+A folder that turns out to hold no transcripts after all — a project with an event log in `.jsonl`, say — is read as plain files instead, with a note on stderr. A source you name with a flag is taken at its word.
 
 A `.zip`, an already-unzipped directory, and a single transcript are all acceptable. When the guess is wrong, name the source:
 
@@ -665,11 +707,13 @@ By default each message becomes its own document, which is the unit you tend to 
 tennis add ~/Downloads/export.zip --per conversation
 ```
 
+A Claude Code session that ran subagents keeps them in the session: their turns carry the session's id, with roles `user/subagent` and `assistant/subagent`. Under `--per conversation` each subagent's run is a document of its own, beside the session's.
+
 Whole threads are long, and a vector is the average of its tokens — see [why chunking matters](/how-it-works#why-chunk-at-all). `--per turn` usually retrieves better; `--per conversation` is for when you want to find the discussion, not the sentence.
 
 ## Searching by attribute
 
-Every imported document carries the attributes needed to find its way home — `source`, `session`, `role`, `title`, `created`, and for local sessions `project`, `cwd`, and `branch`. `project` is the name of the repo a session ran in, taken from its working directory, for Claude Code and Codex alike. The desktop app runs most sessions in a worktree under `.claude/worktrees`, where the last element of the working directory is the worktree's name rather than the repo's, so a session there is filed under the repo it was cut from and the worktree's name is kept as `worktree`. The attributes work on `search` and on `ls` alike:
+Every imported document carries the attributes needed to find its way home — `source`, `session`, `role`, `title`, `created`, and for local sessions `project`, `cwd`, and `branch`. `project` is the name of the repo a session ran in, taken from the working directory it started in, for Claude Code and Codex alike. The desktop app runs most sessions in a worktree under `.claude/worktrees`, where the last element of the working directory is the worktree's name rather than the repo's, so a session there is filed under the repo it was cut from and the worktree's name is kept as `worktree`. The attributes work on `search` and on `ls` alike:
 
 ```bash
 tennis search "retry logic" --where role=user
@@ -677,7 +721,10 @@ tennis search "flaky test" --where project=tennis,branch=main
 tennis search "the timeout" --where source=codex
 tennis ls --where branch=main
 tennis ls --where worktree=brave-turing-1a2b3c
+tennis search "callers" --where 'session=7f3a2c10,role=assistant/subagent'
 ```
+
+A subagent's turns also carry `subagent`, the name of its transcript, and the session's `title`, `project` and `cwd`, so a filter on any of those finds the whole session.
 
 A card's last line is the filter that pulls up its whole conversation: `tennis search --where 'session=<id>'`. With a filter and no query, `search` prints every match in full and in order rather than ranking anything — see [Reading, not ranking](/cli#reading-not-ranking).
 
@@ -754,7 +801,11 @@ Full conversation: `tennis search --where 'session=7f3a2c10-1b2e-4d5f-9a8b-0c1d2
 
 The frontmatter carries what the import knew: the document-id prefix as `session`, the `source`, the `title`, when it was `created`, how many `turns` it ran, and for local agent sessions the `project`, `cwd`, and `branch` when the transcript recorded them. `project` is the name of the repo the session ran in; a session run in a `.claude/worktrees` checkout is filed under the repo it was cut from, and its card carries the worktree's name as `worktree`, between `project` and `cwd`. `summarizer` names the model that wrote the prose, and is absent when the card carries the opening message instead. `digest` is how the next `add` tells whether the card needs writing again — see [Adding again](#adding-again). The last line is how to get the rest: run it and `search` prints the whole conversation, turn by turn (see [Reading, not ranking](/cli#reading-not-ranking)). The card's whole job is to be readable on its own and to say where the full record lives.
 
-The filename is the UTC timestamp, the source, and a slug of the title: `2026-08-01-100000-claude-code-flaky-auth-test-token-refresh-window.md`. Claude Code names a session several turns in, so importing twice can produce two titles for one conversation; the timestamp-and-source prefix is stable, and a re-import replaces the older card rather than leaving both.
+The filename is the UTC timestamp, the source, and a slug of the title: `2026-08-01-100000-claude-code-flaky-auth-test-token-refresh-window.md`. Claude Code names a session several turns in, so importing twice can produce two titles for one conversation; a re-import replaces that conversation's older card rather than leaving both, and never touches another conversation's card. Two conversations that would get the same name — they started in the same second with the same title — are told apart by a short hash of the session's id on the second. A conversation with no timestamp at all is named `undated-<source>-<title>`.
+
+A Claude Code session's subagents get no card of their own: their work is part of the session, which the session's card describes.
+
+When the namespace is not the default, the last line names it, so it runs as pasted: `tennis search --ns work --where 'session=…'`. A path with a comma or a quote in it is quoted so that `--where` reads it whole.
 
 ## A file's card
 
@@ -839,7 +890,7 @@ tennis: no ANTHROPIC_API_KEY or OPENAI_API_KEY; cards will carry the opening mes
 
 The model is asked a different question for each. For a conversation it writes two to four sentences on what the person was trying to do, what was decided or produced, and what was left unresolved. For a file, "what was decided" is the wrong question — a spreadsheet decided nothing — so it is asked what the file is, what it holds, and what someone would open it to find, and is given the file's name and path alongside its text.
 
-Four summaries are in flight at a time, so a first import of several hundred conversations or files is bounded by the provider's rate limit rather than by one round trip after another. A summary that fails — a refusal, a timeout, a rate limit on item 300 — costs that card its prose and nothing else: the card is written with its opening message or opening lines, the failure is reported on stderr and counted as `cards_unsummarized`, the import carries on, and the next `add` tries that card again.
+Four summaries are in flight at a time, so a first import of several hundred conversations or files is bounded by the provider's rate limit rather than by one round trip after another. A summary the model cut off at its length limit is kept up to its last whole sentence; one with no whole sentence counts as failed. A summary that fails — a refusal, a timeout, a rate limit on item 300 — costs that card its prose and nothing else: the card is written with its opening message or opening lines, the failure is reported on stderr and counted as `cards_unsummarized`, the import carries on, and the next `add` tries that card again.
 
 The summarizer sees a conversation's text, not its tool calls and results, with consecutive turns from one speaker merged. A very long session or file is cut in the middle: the first 24,000 characters and the last 8,000 are kept, because the opening says what it set out to do and the end says how it finished.
 
@@ -1381,7 +1432,7 @@ tennis add --codex ~/.codex
 tennis add --files ./whatever
 ```
 
-`nothing to import from X (read as Y)` means detection picked `Y` and found no documents in it — usually the wrong `Y`. See [Importing sessions](/importing#how-detection-works).
+`nothing to import from X (read as Y)` means `Y` found no documents in it. When detection picked an agent format and the folder held no transcripts after all, `add` reads it as plain files instead, so you see this when you named the format yourself, or when the source is genuinely empty. See [Importing sessions](/importing#how-detection-works).
 
 ## "--format X contradicts --Y" / "--X and --Y name different sources"
 
@@ -1427,7 +1478,11 @@ tennis search "auth" --where 'cost>5,status!=failed'
 tennis search "flaky test" --where project=tennis,branch=main
 ```
 
-Supported operators are `=`, `!=`, `>`, `>=`, `<`, `<=`.
+Supported operators are `=`, `!=`, `>`, `>=`, `<`, `<=`. A value with a comma in it goes in double quotes, inside the shell's single quotes, so the comma doesn't end the clause; a quoted value is always compared as text:
+
+```bash
+tennis search --where 'path="/Users/you/Budget, 2026.md"'
+```
 
 ## "invalid namespace name" / "invalid attribute name"
 

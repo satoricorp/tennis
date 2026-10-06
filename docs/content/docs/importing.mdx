@@ -21,7 +21,9 @@ Claude Code and Codex are kinder: they keep their transcripts on your disk alrea
 Detection reads the source rather than the filename:
 
 - **ChatGPT vs Claude exports** are told apart by the shape of their `conversations.json`.
-- **Claude Code vs Codex transcripts** are told apart by the fields on each line of their `.jsonl` — Claude Code writes a `uuid` and `sessionId`, Codex wraps everything in a `{timestamp, type, payload}` envelope.
+- **Claude Code vs Codex transcripts** are told apart by the fields on each line of their `.jsonl` — Claude Code writes turns with a `uuid`, a `sessionId` and a `message`, Codex wraps everything in a `{timestamp, type, payload}` envelope.
+
+A folder that turns out to hold no transcripts after all — a project with an event log in `.jsonl`, say — is read as plain files instead, with a note on stderr. A source you name with a flag is taken at its word.
 
 A `.zip`, an already-unzipped directory, and a single transcript are all acceptable. When the guess is wrong, name the source:
 
@@ -72,11 +74,13 @@ By default each message becomes its own document, which is the unit you tend to 
 tennis add ~/Downloads/export.zip --per conversation
 ```
 
+A Claude Code session that ran subagents keeps them in the session: their turns carry the session's id, with roles `user/subagent` and `assistant/subagent`. Under `--per conversation` each subagent's run is a document of its own, beside the session's.
+
 Whole threads are long, and a vector is the average of its tokens — see [why chunking matters](/how-it-works#why-chunk-at-all). `--per turn` usually retrieves better; `--per conversation` is for when you want to find the discussion, not the sentence.
 
 ## Searching by attribute
 
-Every imported document carries the attributes needed to find its way home — `source`, `session`, `role`, `title`, `created`, and for local sessions `project`, `cwd`, and `branch`. `project` is the name of the repo a session ran in, taken from its working directory, for Claude Code and Codex alike. The desktop app runs most sessions in a worktree under `.claude/worktrees`, where the last element of the working directory is the worktree's name rather than the repo's, so a session there is filed under the repo it was cut from and the worktree's name is kept as `worktree`. The attributes work on `search` and on `ls` alike:
+Every imported document carries the attributes needed to find its way home — `source`, `session`, `role`, `title`, `created`, and for local sessions `project`, `cwd`, and `branch`. `project` is the name of the repo a session ran in, taken from the working directory it started in, for Claude Code and Codex alike. The desktop app runs most sessions in a worktree under `.claude/worktrees`, where the last element of the working directory is the worktree's name rather than the repo's, so a session there is filed under the repo it was cut from and the worktree's name is kept as `worktree`. The attributes work on `search` and on `ls` alike:
 
 ```bash
 tennis search "retry logic" --where role=user
@@ -84,7 +88,10 @@ tennis search "flaky test" --where project=tennis,branch=main
 tennis search "the timeout" --where source=codex
 tennis ls --where branch=main
 tennis ls --where worktree=brave-turing-1a2b3c
+tennis search "callers" --where 'session=7f3a2c10,role=assistant/subagent'
 ```
+
+A subagent's turns also carry `subagent`, the name of its transcript, and the session's `title`, `project` and `cwd`, so a filter on any of those finds the whole session.
 
 A card's last line is the filter that pulls up its whole conversation: `tennis search --where 'session=<id>'`. With a filter and no query, `search` prints every match in full and in order rather than ranking anything — see [Reading, not ranking](/cli#reading-not-ranking).
 

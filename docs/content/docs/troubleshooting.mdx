@@ -79,7 +79,7 @@ tennis add --codex ~/.codex
 tennis add --files ./whatever
 ```
 
-`nothing to import from X (read as Y)` means detection picked `Y` and found no documents in it — usually the wrong `Y`. See [Importing sessions](/importing#how-detection-works).
+`nothing to import from X (read as Y)` means `Y` found no documents in it. When detection picked an agent format and the folder held no transcripts after all, `add` reads it as plain files instead, so you see this when you named the format yourself, or when the source is genuinely empty. See [Importing sessions](/importing#how-detection-works).
 
 ## "--format X contradicts --Y" / "--X and --Y name different sources"
 
@@ -125,7 +125,11 @@ tennis search "auth" --where 'cost>5,status!=failed'
 tennis search "flaky test" --where project=tennis,branch=main
 ```
 
-Supported operators are `=`, `!=`, `>`, `>=`, `<`, `<=`.
+Supported operators are `=`, `!=`, `>`, `>=`, `<`, `<=`. A value with a comma in it goes in double quotes, inside the shell's single quotes, so the comma doesn't end the clause; a quoted value is always compared as text:
+
+```bash
+tennis search --where 'path="/Users/you/Budget, 2026.md"'
+```
 
 ## "invalid namespace name" / "invalid attribute name"
 
