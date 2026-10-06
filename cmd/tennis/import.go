@@ -226,6 +226,7 @@ func runImport(nsName string, paths []string, o importOpts) error {
 		reports      []map[string]any
 		failed       int
 		skippedFiles int
+		skippedDirs  int
 		pathErr      error
 	)
 	for _, p := range paths {
@@ -246,6 +247,9 @@ func runImport(nsName string, paths []string, o importOpts) error {
 		failed += rep["failed"].(int)
 		if n, ok := rep["skipped_files"].(int); ok {
 			skippedFiles += n
+		}
+		if n, ok := rep["skipped_dirs"].(int); ok {
+			skippedDirs += n
 		}
 		reports = append(reports, rep)
 	}
@@ -268,6 +272,7 @@ func runImport(nsName string, paths []string, o importOpts) error {
 			"sources": reports,
 			"written": sink.res.Written, "skipped": sink.res.Skipped,
 			"chunks": sink.res.Chunks, "failed": failed, "skipped_files": skippedFiles,
+			"skipped_dirs": skippedDirs,
 		}
 		if sink.cards != nil {
 			out["cards"] = sink.cards.written
@@ -289,7 +294,10 @@ func runImport(nsName string, paths []string, o importOpts) error {
 			fmt.Printf(", %d cards in %s", sink.cards.written, sink.cards.dir)
 		}
 		if skippedFiles > 0 {
-			fmt.Printf(" (%d files skipped)", skippedFiles)
+			fmt.Printf(" (%s skipped)", plural(skippedFiles, "file"))
+		}
+		if skippedDirs > 0 {
+			fmt.Printf(" (%s passed over)", plural(skippedDirs, "folder"))
 		}
 		if failed > 0 {
 			fmt.Printf(" (%d failed)", failed)
@@ -346,6 +354,7 @@ func importPath(p, format, per, ext string, sink *docSink, warn func(string), qu
 		conversations int
 		failed        int
 		skippedFiles  int
+		skippedDirs   int
 	)
 	switch pl.format {
 	case formatChatGPT, formatClaude:
@@ -392,7 +401,7 @@ func importPath(p, format, per, ext string, sink *docSink, warn func(string), qu
 		}
 
 	case formatFiles:
-		skippedFiles, err = importFiles(a, ext, sink, warn)
+		skippedFiles, skippedDirs, err = importFiles(a, ext, sink, warn)
 		if err != nil {
 			return nil, err
 		}
@@ -403,7 +412,7 @@ func importPath(p, format, per, ext string, sink *docSink, warn func(string), qu
 		// Silence here would look like success. It never is: either the archive
 		// is not what it looked like, or the filter excluded everything in it.
 		if pl.format == formatFiles {
-			return nil, fmt.Errorf("no indexable files in %s (looking for %s, %d skipped)", a.display, lookingFor(ext), skippedFiles)
+			return nil, fmt.Errorf("no indexable files in %s (looking for %s, %s)", a.display, lookingFor(ext), passedOverNote(skippedFiles, skippedDirs))
 		}
 		return nil, fmt.Errorf("nothing to import from %s (read as %s)", a.display, pl.format)
 	}
@@ -414,6 +423,9 @@ func importPath(p, format, per, ext string, sink *docSink, warn func(string), qu
 	if skippedFiles > 0 {
 		rep["skipped_files"] = skippedFiles
 	}
+	if skippedDirs > 0 {
+		rep["skipped_dirs"] = skippedDirs
+	}
 	return rep, nil
 }
 
@@ -423,18 +435,22 @@ func importPath(p, format, per, ext string, sink *docSink, warn func(string), qu
 // presented as one walkable filesystem, so the format adapters never have to
 // care which of the three they were handed.
 type archive struct {
-	display string // the path the user typed, for messages
-	root    string // absolute zip path, or absolute directory, for document IDs
-	isZip   bool
-	fsys    fs.FS
-	entries []archiveEntry
-	closer  io.Closer
+	display    string // the path the user typed, for messages
+	root       string // absolute zip path, or absolute directory, for document IDs
+	isZip      bool
+	fsys       fs.FS
+	entries    []archiveEntry
+	passedOver int // folders the walk did not enter (see passOver)
+	closer     io.Closer
 }
 
 type archiveEntry struct {
 	path string // slash-separated, relative to fsys
 	size int64
 	mod  time.Time
+	// ignored is what a .gitignore in the source names that covers this
+	// file — the file itself, or a folder it is in — or "" for nothing.
+	ignored string
 }
 
 func openArchive(p string) (*archive, error) {
@@ -485,16 +501,33 @@ func (a *archive) Close() error {
 // walk lists every readable file once. Entries that cannot be stat'd are
 // dropped rather than fatal: a single unreadable file in a 20,000-file export
 // is not a reason to import none of it.
+//
+// The folders passOver names are not entered at all; no export or transcript
+// lives in one. What a .gitignore says is only noted on each entry, for
+// importFiles to act on, because the agent readers must not: a ~/.claude
+// kept in git may well ignore its transcripts, and those are what reading it
+// is for.
 func (a *archive) walk() {
+	ig := newIgnores(a.fsys)
 	fs.WalkDir(a.fsys, ".", func(p string, d fs.DirEntry, err error) error {
-		if err != nil || d == nil || d.IsDir() {
+		if err != nil || d == nil {
+			return nil
+		}
+		if d.IsDir() {
+			if p != "." && passOver[d.Name()] {
+				if !hidden(p) {
+					a.passedOver++
+				}
+				return fs.SkipDir
+			}
+			ig.dir(p)
 			return nil
 		}
 		info, err := d.Info()
 		if err != nil {
 			return nil
 		}
-		a.entries = append(a.entries, archiveEntry{path: p, size: info.Size(), mod: info.ModTime()})
+		a.entries = append(a.entries, archiveEntry{path: p, size: info.Size(), mod: info.ModTime(), ignored: ig.file(p)})
 		return nil
 	})
 }
@@ -721,22 +754,32 @@ const maxDetectSniffs = 50
 
 // importFiles is what an archive that is not a chat export gets: every file
 // in it that holds text, read by whatever reads its kind (see readers.go),
-// indexed, and given a card the way every conversation gets one. It returns
-// how many files it passed over, which is reported but never fatal —
-// declining to index a photo is the tool working.
+// indexed, and given a card the way every conversation gets one — except what
+// a .gitignore in it names, which is what git would not keep either. It
+// returns how many files and folders it passed over, which is reported but
+// never fatal: declining to index a photo, or a build folder, is the tool
+// working.
 //
 // Reading runs on a few workers because the readers that call out to the
 // system take a few hundred milliseconds a file, and a folder of PDFs read
 // one at a time would be minutes of silence.
-func importFiles(a *archive, ext string, sink *docSink, warn func(string)) (int, error) {
+func importFiles(a *archive, ext string, sink *docSink, warn func(string)) (skipped, skippedDirs int, err error) {
 	wanted := extSet(ext)
+	ignoredDirs := map[string]bool{}
 	var todo []archiveEntry
 	for _, e := range a.entries {
-		if hidden(e.path) || (len(wanted) > 0 && !wanted[strings.ToLower(path.Ext(e.path))]) {
-			continue
+		switch {
+		case hidden(e.path) || (len(wanted) > 0 && !wanted[strings.ToLower(path.Ext(e.path))]):
+			// Not what anyone meant, or not what they asked for: not counted.
+		case e.ignored == e.path:
+			skipped++
+		case e.ignored != "":
+			ignoredDirs[e.ignored] = true
+		default:
+			todo = append(todo, e)
 		}
-		todo = append(todo, e)
 	}
+	skippedDirs = a.passedOver + len(ignoredDirs)
 
 	type result struct {
 		e    archiveEntry
@@ -765,7 +808,6 @@ func importFiles(a *archive, ext string, sink *docSink, warn func(string)) (int,
 		close(results)
 	}()
 
-	skipped := 0
 	for r := range results {
 		if r.err != nil {
 			skipped++
@@ -789,10 +831,10 @@ func importFiles(a *archive, ext string, sink *docSink, warn func(string)) (int,
 				for range results {
 				}
 			}()
-			return skipped, err
+			return skipped, skippedDirs, err
 		}
 	}
-	return skipped, nil
+	return skipped, skippedDirs, nil
 }
 
 // readConcurrency is how many files are read at once. The built-in readers
@@ -808,6 +850,16 @@ func (a *archive) file(e archiveEntry) fileEntry {
 		f.path = filepath.Join(a.root, filepath.FromSlash(e.path))
 	}
 	return f
+}
+
+// passedOverNote says what a folder walk left out, for the error that it
+// found nothing to index.
+func passedOverNote(files, dirs int) string {
+	note := fmt.Sprintf("%d skipped", files)
+	if dirs > 0 {
+		note += ", " + plural(dirs, "folder") + " passed over"
+	}
+	return note
 }
 
 // lookingFor says what the files filter was, for the error that nothing

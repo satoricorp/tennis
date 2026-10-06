@@ -462,15 +462,16 @@ func TestImportPerConversation(t *testing.T) {
 // said about the photos. A hidden file is not what anyone meant.
 func TestImportPlainZipOfFiles(t *testing.T) {
 	path := writeZip(t, "notes.zip", map[string]string{
-		"notes/auth.md":     "# Session handling\nkeep the user signed in",
-		"notes/budget.xlsx": string(testWorkbook(t)),
-		"notes/memo.docx":   string(testDocx(t, `<w:p><w:r><w:t>Rent is due on the 1st</w:t></w:r></w:p>`)),
-		"notes/page.html":   "<html><body><p>Hotel &amp; taxi</p></body></html>",
-		"notes/script.go":   "package main",
-		"notes/logo.png":    "\x89PNG\x00\x01",
-		"notes/blob.bin":    "\x00\x01\x02",
-		"notes/.secret.md":  "not for the index",
-		"notes/.cache/x.md": "nor this",
+		"notes/auth.md":                   "# Session handling\nkeep the user signed in",
+		"notes/budget.xlsx":               string(testWorkbook(t)),
+		"notes/memo.docx":                 string(testDocx(t, `<w:p><w:r><w:t>Rent is due on the 1st</w:t></w:r></w:p>`)),
+		"notes/page.html":                 "<html><body><p>Hotel &amp; taxi</p></body></html>",
+		"notes/script.go":                 "package main",
+		"notes/logo.png":                  "\x89PNG\x00\x01",
+		"notes/blob.bin":                  "\x00\x01\x02",
+		"notes/.secret.md":                "not for the index",
+		"notes/.cache/x.md":               "nor this",
+		"notes/node_modules/lib/index.js": "module.exports = {}",
 	})
 	var warnings []string
 	recs := collectWarn(t, path, formatAuto, perTurn, func(msg string) { warnings = append(warnings, msg) })
@@ -486,7 +487,7 @@ func TestImportPlainZipOfFiles(t *testing.T) {
 			t.Errorf("%s: indexed as %q, want it to carry %q", name, got[name], want)
 		}
 	}
-	for _, name := range []string{"logo.png", "blob.bin", ".secret.md", ".cache/x.md"} {
+	for _, name := range []string{"logo.png", "blob.bin", ".secret.md", ".cache/x.md", "node_modules/lib/index.js"} {
 		if _, ok := got[name]; ok {
 			t.Errorf("%s should not have been indexed", name)
 		}
@@ -496,6 +497,139 @@ func TestImportPlainZipOfFiles(t *testing.T) {
 	}
 	if len(recs) == 0 || recs[0].attr("name") == "" || recs[0].attr("path") == "" {
 		t.Errorf("file attributes missing: %+v", recs)
+	}
+}
+
+// writeTree lays out files under a fresh directory and returns it.
+func writeTree(t *testing.T, files map[string]string) string {
+	t.Helper()
+	dir := t.TempDir()
+	for name, body := range files {
+		p := filepath.Join(dir, filepath.FromSlash(name))
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return dir
+}
+
+// codeProject is a code checkout as add meets one: a little source, and a great
+// deal that nobody there wrote — dependencies, build output, and what the
+// .gitignore files name.
+var codeProject = map[string]string{
+	"README.md":                                "# Tennis\nsearch what you said",
+	"src/main.go":                              "package main",
+	"src/generated/api.go":                     "package api", // "/generated" is anchored to the root
+	"keep.log":                                 "brought back by !keep.log",
+	"docs/final.md":                            "the plan",
+	".gitignore":                               "*.log\n!keep.log\n/generated\ncoverage/\n",
+	"docs/.gitignore":                          "draft.md\n",
+	"debug.log":                                "a gitignored file",
+	"docs/draft.md":                            "a gitignored file in a nested .gitignore",
+	"generated/api.go":                         "package api",
+	"coverage/index.html":                      "<p>87%</p>",
+	"coverage/lcov/report.txt":                 "nor anything under it",
+	"node_modules/left-pad/index.js":           "module.exports = pad",
+	"src/node_modules/x/index.js":              "module.exports = x",
+	"vendor/github.com/x/y/y.go":               "package y",
+	"target/debug/build.txt":                   "cargo output",
+	"dist/app.js":                              "bundled",
+	"build/out.txt":                            "built",
+	"__pycache__/m.cpython-312.pyc":            "bytecode",
+	"venv/lib/python3.12/site-packages/six.py": "import sys",
+	".cache/node_modules/z.js":                 "under a dot directory: not even counted",
+}
+
+// Pointed at a code project, add reads what the people there wrote. The
+// dependency and build folders are passed over without being entered, what
+// the .gitignore files name is passed over too, and each is counted rather
+// than announced: a folder of node_modules is not a folder of mistakes.
+func TestImportFilesPassesOverDependenciesAndIgnored(t *testing.T) {
+	dir := writeTree(t, codeProject)
+	var warnings []string
+	sink := &docSink{}
+	got := map[string]bool{}
+	sink.capture = func(id, _ string, _ map[string]any) {
+		rel, _ := filepath.Rel(dir, id)
+		got[filepath.ToSlash(rel)] = true
+	}
+	rep, err := importPath(dir, formatAuto, perTurn, defaultExt, sink, func(msg string) { warnings = append(warnings, msg) }, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"README.md", "src/main.go", "src/generated/api.go", "keep.log", "docs/final.md"}
+	if len(got) != len(want) {
+		t.Errorf("indexed %v, want exactly %v", sortedKeys(got), want)
+	}
+	for _, name := range want {
+		if !got[name] {
+			t.Errorf("%s should have been indexed; got %v", name, sortedKeys(got))
+		}
+	}
+	if len(warnings) != 0 {
+		t.Errorf("passing over a folder is not worth a warning: %v", warnings)
+	}
+	// debug.log and docs/draft.md; node_modules twice, vendor, target, dist,
+	// build, __pycache__ and site-packages, then coverage and generated.
+	if rep["skipped_files"] != 2 || rep["skipped_dirs"] != 10 {
+		t.Errorf("skipped_files %v, skipped_dirs %v; want 2 and 10", rep["skipped_files"], rep["skipped_dirs"])
+	}
+
+	// --ext narrows what is read, not what is passed over.
+	sink = &docSink{capture: func(string, string, map[string]any) {}}
+	if rep, err = importPath(dir, formatAuto, perTurn, ".js", sink, func(string) {}, true); err == nil {
+		t.Fatalf("every .js file is in a passed-over folder, so nothing should be indexed: %v", rep)
+	} else if !strings.Contains(err.Error(), "0 skipped, 8 folders passed over") {
+		t.Errorf("the error should say where the files went: %v", err)
+	}
+}
+
+// The folder a person names is the folder they mean, whatever it is called.
+func TestImportFilesReadsANamedBuildFolder(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "build")
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "notes.md"), []byte("what the build does"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if recs := collect(t, root, formatAuto, perTurn); len(recs) != 1 {
+		t.Errorf("got %d documents from the named folder, want 1", len(recs))
+	}
+}
+
+// A .gitignore is a statement about a code project, not about transcripts.
+// A ~/.claude kept in git that ignores projects/ still has its sessions read,
+// because those are what pointing tennis at it asks for.
+func TestImportClaudeCodeIgnoresGitignore(t *testing.T) {
+	dir := writeTree(t, map[string]string{
+		".gitignore": "projects/\n*.jsonl\n",
+		"projects/-Users-joe-git-tennis/S1.jsonl": claudeCodeSession,
+	})
+	if recs := collect(t, dir, formatAuto, perTurn); len(recs) != 4 {
+		t.Errorf("got %d documents, want the session's 4", len(recs))
+	}
+}
+
+// seed is add --files with the namespace first, and passes over the same
+// folders.
+func TestSeedPassesOverDependenciesAndIgnored(t *testing.T) {
+	cache := ndjsonTestCache(t)
+	t.Setenv("TENNIS_CACHE", cache)
+	dir := writeTree(t, codeProject)
+	dbPath := filepath.Join(t.TempDir(), "seed.sqlite")
+	out, err := captureStdout(t, func() error {
+		return cmdSeed([]string{"notes", dir, "--db", dbPath, "--json"})
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	res := decodeImportResult(t, out)
+	if res["written"] != float64(5) || res["skipped_files"] != float64(2) || res["skipped_dirs"] != float64(10) {
+		t.Errorf("seed: %v; want 5 written, 2 files and 10 folders skipped", res)
 	}
 }
 

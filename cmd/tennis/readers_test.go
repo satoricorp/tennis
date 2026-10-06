@@ -5,12 +5,15 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
+	"testing/fstest"
 )
 
 // entry is a fileEntry over bytes in memory, the shape a zip member has.
@@ -234,4 +237,75 @@ func TestExternalReaders(t *testing.T) {
 			t.Error("garbage passed through the gate without complaint")
 		}
 	})
+}
+
+// The .gitignore patterns people write, read the way git reads them: a bare
+// name matches at any depth, a slash anchors it, a trailing slash means
+// folders only, ** spans folders, the last match wins — a deeper file's over
+// a shallower one's — and nothing inside an ignored folder comes back.
+func TestGitignore(t *testing.T) {
+	fsys := fstest.MapFS{
+		".gitignore": {Data: []byte("# what the build leaves\n*.log\n!keep.log\n/generated\ncoverage/\n" +
+			"docs/**/draft-*.md\nsecret[0-9].txt\n*.tmp   \n\\#scratch.md\n\n")},
+		"sub/.gitignore":       {Data: []byte("local.md\r\n!debug.log\r\n")},
+		"generated/.gitignore": {Data: []byte("!api.go\n")},
+	}
+	want := map[string]string{
+		"app.log":              "app.log",
+		"keep.log":             "",
+		"sub/deep/trace.log":   "sub/deep/trace.log",
+		"sub/debug.log":        "",
+		"sub/local.md":         "sub/local.md",
+		"local.md":             "",
+		"generated/api.go":     "generated",
+		"generated/v1/x.go":    "generated",
+		"src/generated/api.go": "",
+		"coverage/index.html":  "coverage",
+		"src/coverage":         "", // a file, and the pattern is for folders
+		"docs/draft-1.md":      "docs/draft-1.md",
+		"docs/a/b/draft-2.md":  "docs/a/b/draft-2.md",
+		"docs/final.md":        "",
+		"secret1.txt":          "secret1.txt",
+		"secretx.txt":          "",
+		"notes.tmp":            "notes.tmp",
+		"#scratch.md":          "#scratch.md",
+		"README.md":            "",
+	}
+	for p := range want {
+		fsys[p] = &fstest.MapFile{Data: []byte("x")}
+	}
+
+	ig := newIgnores(fsys)
+	got := map[string]string{}
+	err := fs.WalkDir(fsys, ".", func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			ig.dir(p)
+		} else if path.Base(p) != ".gitignore" {
+			got[p] = ig.file(p)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for p, w := range want {
+		if got[p] != w {
+			t.Errorf("%s: ignored by %q, want %q", p, got[p], w)
+		}
+	}
+}
+
+// A pattern the matcher cannot follow is dropped on its own; the rest of the
+// file still applies.
+func TestGitignoreSurvivesABadPattern(t *testing.T) {
+	g := parseGitignore(".", []byte("[z-a]\n*.log\n[unclosed\n"))
+	if len(g.rules) != 2 {
+		t.Fatalf("got %d rules, want the two that make sense", len(g.rules))
+	}
+	if !g.rules[0].re.MatchString("x.log") || !g.rules[1].re.MatchString("[unclosed") {
+		t.Errorf("rules: %v, %v", g.rules[0].re, g.rules[1].re)
+	}
 }

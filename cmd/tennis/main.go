@@ -328,7 +328,7 @@ func cmdSeed(args []string) error {
 	wanted := extSet(*ext)
 
 	var docs []tennis.Document
-	skippedFiles := 0
+	skippedFiles, skippedDirs := 0, 0
 	skip := func(p, why string) {
 		skippedFiles++
 		if !*asJSON {
@@ -336,22 +336,36 @@ func cmdSeed(args []string) error {
 		}
 	}
 	for _, root := range paths {
+		ig := newIgnores(os.DirFS(root))
 		err := filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
 			if err != nil {
 				return err
 			}
 			// Hidden entries are skipped below the root, not at it: the
 			// folder a person names is the folder they mean.
-			if rel, _ := filepath.Rel(root, p); rel != "." && hidden(filepath.ToSlash(rel)) {
+			rel, _ := filepath.Rel(root, p)
+			rel = filepath.ToSlash(rel)
+			if rel != "." && hidden(rel) {
 				if d.IsDir() {
 					return fs.SkipDir
 				}
 				return nil
 			}
+			// The folders add passes over, for the same reasons. Seed has
+			// no transcripts to look for, so a folder a .gitignore names is
+			// not entered either.
 			if d.IsDir() {
+				if (rel != "." && passOver[d.Name()]) || ig.dir(rel) != "" {
+					skippedDirs++
+					return fs.SkipDir
+				}
 				return nil
 			}
 			if len(wanted) > 0 && !wanted[strings.ToLower(filepath.Ext(p))] {
+				return nil
+			}
+			if ig.file(rel) != "" {
+				skippedFiles++
 				return nil
 			}
 			info, err := d.Info()
@@ -387,7 +401,7 @@ func cmdSeed(args []string) error {
 		}
 	}
 	if len(docs) == 0 {
-		return fmt.Errorf("no indexable files under %s (looking for %s, %d skipped)", strings.Join(paths, ", "), lookingFor(*ext), skippedFiles)
+		return fmt.Errorf("no indexable files under %s (looking for %s, %s)", strings.Join(paths, ", "), lookingFor(*ext), passedOverNote(skippedFiles, skippedDirs))
 	}
 
 	res, err := ns.Write(ctx, docs)
@@ -395,11 +409,14 @@ func cmdSeed(args []string) error {
 		return err
 	}
 	if *asJSON {
-		return emit(map[string]any{"written": res.Written, "skipped": res.Skipped, "chunks": res.Chunks, "skipped_files": skippedFiles})
+		return emit(map[string]any{"written": res.Written, "skipped": res.Skipped, "chunks": res.Chunks, "skipped_files": skippedFiles, "skipped_dirs": skippedDirs})
 	}
 	fmt.Printf("seeded %d, skipped %d unchanged, %d chunks in %q", res.Written, res.Skipped, res.Chunks, nsName)
 	if skippedFiles > 0 {
-		fmt.Printf(" (%d files skipped)", skippedFiles)
+		fmt.Printf(" (%s skipped)", plural(skippedFiles, "file"))
+	}
+	if skippedDirs > 0 {
+		fmt.Printf(" (%s passed over)", plural(skippedDirs, "folder"))
 	}
 	fmt.Println()
 	return nil

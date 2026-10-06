@@ -204,6 +204,7 @@ A folder add reads every file that holds text, each by whatever reads its kind:
 The rest is passed over:
 
 - **Photos, audio, video, archives, dotfiles**, and anything under a dot directory such as `.git` are skipped silently. A folder of photos is not a folder of mistakes.
+- **Dependency and build folders** — `node_modules`, `vendor`, `target`, `dist`, `build`, `__pycache__` and `site-packages`, wherever they appear — and whatever a `.gitignore` inside the folder names are skipped silently too, but counted: the summary line ends `(N folders passed over)`. The folder you name is read whatever it is called, so `tennis add ./vendor` reads it.
 - **Other binary files, and text over 10MB**, are skipped with a note on stderr. Binary detection is a NUL-byte check in the leading 8KB, the same heuristic git uses.
 - **Formats with no reader on this machine** — a PDF on Linux without `pdftotext`, or a Pages file anywhere but a Mac — are skipped with a "no reader on this machine" note that says what is missing.
 
@@ -1352,13 +1353,19 @@ tennis ns list                # every namespace and its counts
 
 ## "no indexable files in … (looking for any file with text, N skipped)"
 
-`add` reads every file with text in it by default, so this means the folder held none it could read: photos, archives, or formats with no reader on this machine. With `--ext`, only the named extensions count:
+`add` reads every file with text in it by default, so this means the folder held none it could read: photos, archives, formats with no reader on this machine, or files that are all inside folders `add` passes over. With `--ext`, only the named extensions count:
 
 ```bash
 tennis add ./src --files --ext .go,.ts,.rs
 ```
 
-The `N skipped` count is the files passed over: photos, audio, video and archives (quietly), unknown binaries and text over 10MB (with a note on stderr), and formats whose reader is missing on this machine — a PDF with neither `pdftotext` nor macOS, say — which are noted along with what to install.
+The `N skipped` count is the files passed over: photos, audio, video and archives (quietly), files a `.gitignore` names (quietly), unknown binaries and text over 10MB (with a note on stderr), and formats whose reader is missing on this machine — a PDF with neither `pdftotext` nor macOS, say — which are noted along with what to install.
+
+When the error ends `M folders passed over`, those are folders `add` did not enter: `node_modules`, `vendor`, `target`, `dist`, `build`, `__pycache__` and `site-packages` wherever they appear, and folders a `.gitignore` inside the source names. To read one anyway, name it directly — the folder you name is always read:
+
+```bash
+tennis add ./vendor --files
+```
 
 ## "does not look like a chat export" / "nothing to import from …"
 

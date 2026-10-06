@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"html"
 	"io"
+	"io/fs"
 	"net/url"
 	"os"
 	"os/exec"
@@ -113,6 +114,19 @@ func hidden(slashPath string) bool {
 		}
 	}
 	return false
+}
+
+// passOver names the folders a code project fills with what nobody there
+// wrote: fetched dependencies, build output, bytecode. One node_modules can
+// outnumber the rest of a project a hundred to one, and every file in it
+// would be read, indexed, and given a card — a summarizer call apiece when a
+// key is set. A walk passes these over without comment, as it does a dot
+// directory, but counts them, so the report says where the rest went. Like
+// hidden, this applies below the folder named: `tennis add ./build` still
+// reads ./build.
+var passOver = map[string]bool{
+	"node_modules": true, "vendor": true, "target": true, "dist": true,
+	"build": true, "__pycache__": true, "site-packages": true,
 }
 
 // fileText is the one gate add and seed go through: the text that gets
@@ -506,4 +520,196 @@ func plistUnescape(s string) string {
 		}
 	}
 	return b.String()
+}
+
+// --- .gitignore --------------------------------------------------------------
+
+// A folder that is a git repository has already said what in it is not
+// worth keeping. A walk honours the .gitignore files it finds inside the
+// folder it was given — not those above it, nor git's global excludes — with
+// git's rules for the patterns people write: comments, "!" to re-include, a
+// trailing slash for folders only, a leading or inner slash to anchor a
+// pattern to its file's folder, and *, ?, [a-z] and ** as globs.
+
+// gitignore is one .gitignore file: its patterns, in order, and the folder
+// they are relative to.
+type gitignore struct {
+	dir   string // slash path from the root of the walk, "." for the root
+	rules []ignoreRule
+}
+
+type ignoreRule struct {
+	re      *regexp.Regexp
+	base    bool // no slash in the pattern: match the last name, at any depth
+	negate  bool // "!": a match brings the path back
+	dirOnly bool // a trailing "/": folders only
+}
+
+func parseGitignore(dir string, body []byte) gitignore {
+	g := gitignore{dir: dir}
+	for _, line := range strings.Split(string(body), "\n") {
+		line = strings.TrimSuffix(line, "\r")
+		for strings.HasSuffix(line, " ") && !strings.HasSuffix(line, `\ `) {
+			line = line[:len(line)-1]
+		}
+		if line == "" || line[0] == '#' {
+			continue
+		}
+		var r ignoreRule
+		if line[0] == '!' {
+			r.negate, line = true, line[1:]
+		}
+		if strings.HasSuffix(line, "/") {
+			r.dirOnly, line = true, strings.TrimRight(line, "/")
+		}
+		r.base = !strings.Contains(line, "/")
+		line = strings.TrimPrefix(line, "/")
+		if line == "" {
+			continue
+		}
+		re, err := regexp.Compile("^" + globRegexp(line) + "$")
+		if err != nil {
+			// A pattern this reader cannot follow is one git may well
+			// honour; leaving it out reads a file git would not, which is
+			// the side to err on.
+			continue
+		}
+		r.re = re
+		g.rules = append(g.rules, r)
+	}
+	return g
+}
+
+// globRegexp turns a gitignore glob into a regular expression. * and ? stay
+// within one name; ** as a whole segment spans any number of folders.
+func globRegexp(glob string) string {
+	var b strings.Builder
+	for i := 0; i < len(glob); i++ {
+		switch c := glob[i]; c {
+		case '*':
+			segment := strings.HasPrefix(glob[i:], "**") &&
+				(i == 0 || glob[i-1] == '/') && (i+2 == len(glob) || glob[i+2] == '/')
+			switch {
+			case segment && i+2 == len(glob):
+				b.WriteString(".*") // "logs/**": everything inside
+				i++
+			case segment:
+				b.WriteString("(?:.*/)?") // "**/": any folders, or none
+				i += 2
+			default:
+				b.WriteString("[^/]*")
+			}
+		case '?':
+			b.WriteString("[^/]")
+		case '[':
+			class, n := globClass(glob[i:])
+			if n == 0 {
+				b.WriteString(`\[`)
+				continue
+			}
+			b.WriteString(class)
+			i += n - 1
+		case '\\':
+			if i+1 < len(glob) {
+				i++
+			}
+			b.WriteString(regexp.QuoteMeta(glob[i : i+1]))
+		default:
+			b.WriteString(regexp.QuoteMeta(glob[i : i+1]))
+		}
+	}
+	return b.String()
+}
+
+// globClass translates the bracket expression s starts with — [abc], [a-z],
+// [!a-z] — and says how many bytes of s it took; 0 means it is unclosed, and
+// the bracket is only a bracket.
+func globClass(s string) (string, int) {
+	var b strings.Builder
+	b.WriteByte('[')
+	i := 1
+	if i < len(s) && (s[i] == '!' || s[i] == '^') {
+		b.WriteString("^/")
+		i++
+	}
+	for first := true; i < len(s); i, first = i+1, false {
+		switch c := s[i]; {
+		case c == ']' && !first:
+			b.WriteByte(']')
+			return b.String(), i + 1
+		case c == '\\' && i+1 < len(s):
+			i++
+			b.WriteString(regexp.QuoteMeta(s[i : i+1]))
+		case c == '\\' || c == '[' || c == ']' || c == '^':
+			b.WriteByte('\\')
+			b.WriteByte(c)
+		default:
+			b.WriteByte(c)
+		}
+	}
+	return "", 0
+}
+
+// ignores applies the .gitignore files one walk finds, the way git does:
+// each folder's rules on top of its parent's, the last match winning, and
+// nothing inside an ignored folder brought back, since git never looks in
+// one. It relies on the walk reaching a folder before what is in it, which
+// fs.WalkDir and filepath.WalkDir both do.
+type ignores struct {
+	fsys    fs.FS
+	inForce map[string][]gitignore // by folder: the files that apply in it, outermost first
+	under   map[string]string      // ignored folder → the outermost ignored folder it is in, itself if none
+}
+
+func newIgnores(fsys fs.FS) *ignores {
+	return &ignores{fsys: fsys, inForce: map[string][]gitignore{}, under: map[string]string{}}
+}
+
+// dir is called as the walk enters a folder, by its slash path from the
+// root. It returns the ignored folder this one is, or is inside, or "" —
+// having read this folder's own .gitignore for what is in it.
+func (g *ignores) dir(p string) string {
+	if p != "." {
+		if why := g.check(p, true); why != "" {
+			g.under[p] = why
+			return why
+		}
+	}
+	rules := g.inForce[path.Dir(p)]
+	if body, err := fs.ReadFile(g.fsys, path.Join(p, ".gitignore")); err == nil {
+		rules = append(rules[:len(rules):len(rules)], parseGitignore(p, body))
+	}
+	g.inForce[p] = rules
+	return ""
+}
+
+// file returns what makes a file ignored — the file itself, or the outermost
+// ignored folder it is in — or "" when nothing does.
+func (g *ignores) file(p string) string { return g.check(p, false) }
+
+func (g *ignores) check(p string, isDir bool) string {
+	parent := path.Dir(p)
+	if why, ok := g.under[parent]; ok {
+		return why
+	}
+	ignored := false
+	for _, gi := range g.inForce[parent] {
+		rel := p
+		if gi.dir != "." {
+			rel = strings.TrimPrefix(p, gi.dir+"/")
+		}
+		for _, r := range gi.rules {
+			subject := rel
+			if r.base {
+				subject = path.Base(rel)
+			}
+			if (isDir || !r.dirOnly) && r.re.MatchString(subject) {
+				ignored = !r.negate
+			}
+		}
+	}
+	if ignored {
+		return p
+	}
+	return ""
 }
