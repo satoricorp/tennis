@@ -457,7 +457,7 @@ type archive struct {
 	isZip      bool
 	fsys       fs.FS
 	entries    []archiveEntry
-	passedOver int // folders the walk did not enter (see passOver)
+	passedOver int // folders a plain-files import leaves out, each counted once (see walk)
 	closer     io.Closer
 }
 
@@ -481,6 +481,17 @@ func openArchive(p string) (*archive, error) {
 	}
 
 	switch {
+	case info.IsDir() && isDocument(abs):
+		// The folder a person names is read as a folder — unless a Mac
+		// would call it a file, and then it is the one document it is.
+		size, mod := bundleStat(os.DirFS(abs), ".")
+		return &archive{
+			display: p,
+			root:    filepath.Dir(abs),
+			fsys:    os.DirFS(filepath.Dir(abs)),
+			entries: []archiveEntry{{path: filepath.Base(abs), size: size, mod: mod}},
+		}, nil
+
 	case info.IsDir():
 		a := &archive{display: p, root: abs, fsys: os.DirFS(abs)}
 		a.walk()
@@ -519,34 +530,100 @@ func (a *archive) Close() error {
 // dropped rather than fatal: a single unreadable file in a 20,000-file export
 // is not a reason to import none of it.
 //
-// The folders passOver names are not entered at all; no export or transcript
-// lives in one. What a .gitignore says is only noted on each entry, for
-// importFiles to act on, because the agent readers must not: a ~/.claude
-// kept in git may well ignore its transcripts, and those are what reading it
-// is for.
+// Some folders are not entered at all: those passOver names, since no
+// export or transcript lives in one; the bundles that are no document; and
+// a link to a folder, which could lead anywhere, the folder being walked
+// among them. A document saved as a folder is listed as the one file it is.
+// What a .gitignore says is only noted on each entry, for importFiles to act
+// on, because the agent readers must not: a ~/.claude kept in git may well
+// ignore its transcripts, and those are what reading it is for.
+//
+// passedOver counts, once each, the folders a plain-files import leaves out:
+// those not entered, and the outermost of those a .gitignore names, which
+// are entered only for the agent readers' sake. A folder inside one already
+// counted is not counted again, and nor is one under a dot directory, which
+// nobody adding a folder meant.
 func (a *archive) walk() {
 	ig := newIgnores(a.fsys)
+	prune := func(p string) {
+		if why := ig.check(p, true); (why == "" || why == p) && !hidden(p) {
+			a.passedOver++
+		}
+	}
 	fs.WalkDir(a.fsys, ".", func(p string, d fs.DirEntry, err error) error {
 		if err != nil || d == nil {
 			return nil
 		}
 		if d.IsDir() {
-			if p != "." && passOver[d.Name()] {
-				if !hidden(p) {
+			isBundle, document := bundle(d.Name())
+			switch {
+			case p == ".":
+				ig.dir(p)
+			case isBundle && document && !a.isZip:
+				size, mod := bundleStat(a.fsys, p)
+				a.entries = append(a.entries, archiveEntry{path: p, size: size, mod: mod, ignored: ig.check(p, true)})
+				return fs.SkipDir
+			case isBundle || passOver[d.Name()]:
+				prune(p)
+				return fs.SkipDir
+			default:
+				if why := ig.dir(p); why == p && !hidden(p) {
 					a.passedOver++
 				}
-				return fs.SkipDir
 			}
-			ig.dir(p)
 			return nil
 		}
 		info, err := d.Info()
 		if err != nil {
 			return nil
 		}
+		if info.Mode()&fs.ModeSymlink != 0 {
+			// A link is read as what it points to, so it is measured as
+			// that too: the link's own size is the length of the path in
+			// it, and would let any file past the caps. One that points
+			// nowhere keeps its own, and says so when it is read.
+			if target, err := fs.Stat(a.fsys, p); err == nil {
+				if target.IsDir() {
+					prune(p)
+					return nil
+				}
+				info = target
+			}
+		}
 		a.entries = append(a.entries, archiveEntry{path: p, size: info.Size(), mod: info.ModTime(), ignored: ig.file(p)})
 		return nil
 	})
+}
+
+// isDocument reports whether a folder is a document saved as one (see
+// bundles).
+func isDocument(name string) bool {
+	isBundle, document := bundle(name)
+	return isBundle && document
+}
+
+// bundleStat measures a document saved as a folder: the size of everything
+// in it, and when any of it last changed. The folder's own time moves only
+// when something is added to its top level or taken from it, and an edit
+// to a Pages document rewrites a file further down.
+func bundleStat(fsys fs.FS, p string) (size int64, mod time.Time) {
+	fs.WalkDir(fsys, p, func(_ string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+		info, err := d.Info()
+		if err != nil {
+			return nil
+		}
+		if !d.IsDir() {
+			size += info.Size()
+		}
+		if info.ModTime().After(mod) {
+			mod = info.ModTime()
+		}
+		return nil
+	})
+	return size, mod
 }
 
 func (a *archive) open(p string) (fs.File, error) {
@@ -821,7 +898,6 @@ const maxDetectSniffs = 50
 // one at a time would be minutes of silence.
 func importFiles(a *archive, ext string, sink *docSink, warn func(string)) (skipped, skippedDirs int, err error) {
 	wanted := extSet(ext)
-	ignoredDirs := map[string]bool{}
 	var todo []archiveEntry
 	for _, e := range a.entries {
 		switch {
@@ -830,12 +906,12 @@ func importFiles(a *archive, ext string, sink *docSink, warn func(string)) (skip
 		case e.ignored == e.path:
 			skipped++
 		case e.ignored != "":
-			ignoredDirs[e.ignored] = true
+			// In a folder a .gitignore names, which the walk counted.
 		default:
 			todo = append(todo, e)
 		}
 	}
-	skippedDirs = a.passedOver + len(ignoredDirs)
+	skippedDirs = a.passedOver
 
 	type result struct {
 		e    archiveEntry

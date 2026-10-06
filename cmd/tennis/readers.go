@@ -76,6 +76,7 @@ var readers = map[string]func(fileEntry) (string, error){
 	".doc":        readWithTextutil,
 	".odt":        readWithTextutil,
 	".webarchive": readWithTextutil,
+	".rtfd":       readWithTextutil, // a folder: see bundles
 
 	".pages":   readWithSpotlight,
 	".numbers": readWithSpotlight,
@@ -128,6 +129,28 @@ func hidden(slashPath string) bool {
 var passOver = map[string]bool{
 	"node_modules": true, "vendor": true, "target": true, "dist": true,
 	"build": true, "__pycache__": true, "site-packages": true,
+}
+
+// bundles are the folders a Mac shows as one thing, by extension: true for a
+// document, false for anything else. A Pages, Numbers or Keynote file saved
+// as a package, or rich text with its pictures (.rtfd), is one document to
+// Finder and to Spotlight, and its parts — a document identifier, a build
+// history, a preview — mean nothing alone. A walk lists the folder as one
+// entry, read whole, by its path, with the reader its extension names. An
+// app, a plug-in, a framework or a Photos library is no document at all,
+// and is passed over and counted like node_modules. Inside a zip there is
+// no path to hand a reader, so a document saved as a folder is passed over
+// there too.
+var bundles = map[string]bool{
+	".pages": true, ".numbers": true, ".key": true, ".rtfd": true,
+	".app": false, ".bundle": false, ".framework": false, ".photoslibrary": false,
+}
+
+// bundle reports whether a folder of this name is one thing to a Mac, and
+// whether that thing is a document.
+func bundle(name string) (isBundle, document bool) {
+	document, isBundle = bundles[strings.ToLower(path.Ext(name))]
+	return isBundle, document
 }
 
 // fileText is the one gate add and seed go through: the text that gets

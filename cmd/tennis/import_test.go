@@ -827,6 +827,7 @@ var codeProject = map[string]string{
 	"coverage/lcov/report.txt":                 "nor anything under it",
 	"node_modules/left-pad/index.js":           "module.exports = pad",
 	"src/node_modules/x/index.js":              "module.exports = x",
+	"generated/node_modules/z/index.js":        "inside an ignored folder: counted with it, once",
 	"vendor/github.com/x/y/y.go":               "package y",
 	"target/debug/build.txt":                   "cargo output",
 	"dist/app.js":                              "bundled",
@@ -866,17 +867,192 @@ func TestImportFilesPassesOverDependenciesAndIgnored(t *testing.T) {
 		t.Errorf("passing over a folder is not worth a warning: %v", warnings)
 	}
 	// debug.log and docs/draft.md; node_modules twice, vendor, target, dist,
-	// build, __pycache__ and site-packages, then coverage and generated.
+	// build, __pycache__ and site-packages, then coverage and generated —
+	// and not generated/node_modules, which is in a folder already counted.
 	if rep["skipped_files"] != 2 || rep["skipped_dirs"] != 10 {
 		t.Errorf("skipped_files %v, skipped_dirs %v; want 2 and 10", rep["skipped_files"], rep["skipped_dirs"])
 	}
 
-	// --ext narrows what is read, not what is passed over.
+	// --ext narrows what is read, not what is passed over: the ignored
+	// folders count though nothing in them is a .js file.
 	sink = &docSink{capture: func(string, string, map[string]any) {}}
 	if rep, err = importPath(dir, formatAuto, perTurn, ".js", sink, func(string) {}, true); err == nil {
 		t.Fatalf("every .js file is in a passed-over folder, so nothing should be indexed: %v", rep)
-	} else if !strings.Contains(err.Error(), "0 skipped, 8 folders passed over") {
+	} else if !strings.Contains(err.Error(), "0 skipped, 10 folders passed over") {
 		t.Errorf("the error should say where the files went: %v", err)
+	}
+}
+
+// macFolder holds what a Mac shows as single files but stores as folders:
+// documents saved as packages, rich text with its pictures, and things that
+// are no document at all.
+var macFolder = map[string]string{
+	"notes.md": "the plan",
+	"Report.pages/Metadata/DocumentIdentifier":        "5D2E0A3C-1B4F-4C8E-9F6A-7B3D2E1C0A9F",
+	"Report.pages/Metadata/BuildVersionHistory.plist": "<plist><array><string>M11.2-7032.0.145-1</string></array></plist>",
+	"Report.pages/Data/notes.txt":                     "a part, not a document",
+	"Budget.numbers/Metadata/DocumentIdentifier":      "8C1F",
+	"Deck.key/Metadata/DocumentIdentifier":            "9A2E",
+	"Trip.rtfd/TXT.rtf":                               `{\rtf1\ansi\deff0 {\fonttbl {\f0 Helvetica;}}\f0\fs24 Hotel Esencia in Tulum\par}`,
+	"Tennis.app/Contents/Info.plist":                  "<plist/>",
+	"Hook.bundle/Contents/Info.plist":                 "<plist/>",
+	"Sparkle.framework/Resources/Info.plist":          "<plist/>",
+	"Photos Library.photoslibrary/database/notes.txt": "the library's own",
+	"node_modules/x/index.js":                         "module.exports = x",
+}
+
+// macTree lays macFolder out on disk, with two links beside it: one to a
+// document past the cap and one to a folder, both outside what is walked.
+func macTree(t *testing.T) string {
+	t.Helper()
+	dir := writeTree(t, macFolder)
+	outside := writeTree(t, map[string]string{"elsewhere/a.md": "not under the folder added"})
+	big := filepath.Join(outside, "big.pdf")
+	f, err := os.Create(big)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Sparse, so it costs nothing to make; its size is what is under test.
+	if err := f.Truncate(maxDocumentSize + 1); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+	for link, target := range map[string]string{"big.pdf": big, "elsewhere": filepath.Join(outside, "elsewhere")} {
+		if err := os.Symlink(target, filepath.Join(dir, link)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return dir
+}
+
+// A folder a Mac calls a file is listed as that file, measured as the whole
+// of it, and never walked into; a folder that is no document is passed over
+// and counted like node_modules, and so is a link to a folder. A link to a
+// file is measured as the file it points to.
+func TestWalkListsBundlesAsFiles(t *testing.T) {
+	dir := macTree(t)
+	a, err := openArchive(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]int64{}
+	for _, e := range a.entries {
+		got[e.path] = e.size
+	}
+	want := map[string]int64{
+		"notes.md":       8,
+		"Report.pages":   int64(len(macFolder["Report.pages/Metadata/DocumentIdentifier"]) + len(macFolder["Report.pages/Metadata/BuildVersionHistory.plist"]) + len(macFolder["Report.pages/Data/notes.txt"])),
+		"Budget.numbers": 4,
+		"Deck.key":       4,
+		"Trip.rtfd":      int64(len(macFolder["Trip.rtfd/TXT.rtf"])),
+		"big.pdf":        maxDocumentSize + 1,
+	}
+	if len(got) != len(want) {
+		t.Errorf("listed %v, want %v", got, want)
+	}
+	for p, size := range want {
+		if got[p] != size {
+			t.Errorf("%s: listed at %d bytes, want %d", p, got[p], size)
+		}
+	}
+	// The app, the plug-in, the framework, the library, node_modules, and
+	// the link to a folder.
+	if a.passedOver != 6 {
+		t.Errorf("passed over %d folders, want 6", a.passedOver)
+	}
+}
+
+// Read, each document saved as a folder is one document, under the
+// folder's own path, or one reason it is not; none of its parts is ever
+// indexed or complained about. A link past the cap is held to the cap.
+func TestImportFilesReadsBundlesWhole(t *testing.T) {
+	dir := macTree(t)
+	var warnings []string
+	sink := &docSink{}
+	got := map[string]string{}
+	sink.capture = func(id, text string, _ map[string]any) {
+		rel, _ := filepath.Rel(dir, id)
+		got[filepath.ToSlash(rel)] = text
+	}
+	rep, err := importPath(dir, formatAuto, perTurn, defaultExt, sink, func(msg string) { warnings = append(warnings, msg) }, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got["notes.md"] != "the plan" {
+		t.Errorf("notes.md: %q", got["notes.md"])
+	}
+	if runtime.GOOS == "darwin" && !strings.Contains(got["Trip.rtfd"], "Hotel Esencia in Tulum") {
+		t.Errorf("Trip.rtfd should be read whole by textutil, got %q", got["Trip.rtfd"])
+	}
+	for p := range got {
+		if strings.Contains(p, "/") {
+			t.Errorf("%s was indexed: nothing inside a bundle, a link to a folder, or a folder passed over is", p)
+		}
+	}
+	for _, w := range warnings {
+		if strings.Contains(w, ".pages/") || strings.Contains(w, ".numbers/") || strings.Contains(w, ".key/") || strings.Contains(w, "elsewhere") {
+			t.Errorf("a warning about a part, or a link to a folder: %s", w)
+		}
+	}
+	var capped bool
+	for _, w := range warnings {
+		capped = capped || strings.Contains(w, "big.pdf") && strings.Contains(w, "over the 100MB cap")
+	}
+	if !capped {
+		t.Errorf("a link to a document past the cap should be held to it; warnings: %v", warnings)
+	}
+	if rep["skipped_dirs"] != 6 {
+		t.Errorf("skipped_dirs %v, want 6", rep["skipped_dirs"])
+	}
+}
+
+// The folder a person names is read as a folder, whatever it is called —
+// unless it is a document saved as one, and then it is that document.
+func TestImportNamedBundle(t *testing.T) {
+	dir := writeTree(t, macFolder)
+	a, err := openArchive(filepath.Join(dir, "Trip.rtfd"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(a.entries) != 1 || a.entries[0].path != "Trip.rtfd" || a.docID("Trip.rtfd") != filepath.Join(dir, "Trip.rtfd") {
+		t.Errorf("a named .rtfd should be one entry under its own path: %+v", a.entries)
+	}
+	a.Close()
+	if runtime.GOOS == "darwin" {
+		recs := collect(t, filepath.Join(dir, "Trip.rtfd"), formatAuto, perTurn)
+		if len(recs) != 1 || !strings.Contains(recs[0].Text, "Hotel Esencia in Tulum") {
+			t.Errorf("a named .rtfd should be read as the one document it is: %+v", recs)
+		}
+	}
+	if recs := collect(t, filepath.Join(dir, "Tennis.app"), formatAuto, perTurn); len(recs) != 1 {
+		t.Errorf("a named .app is read as the folder it is; got %d documents", len(recs))
+	}
+}
+
+// Inside a zip there is no path to hand a reader, so a document saved as a
+// folder is passed over there, silently, with the rest of the bundles.
+func TestImportZipPassesOverBundles(t *testing.T) {
+	zipped := map[string]string{}
+	for name, body := range macFolder {
+		zipped["export/"+name] = body
+	}
+	var warnings []string
+	sink := &docSink{}
+	var ids []string
+	sink.capture = func(id, _ string, _ map[string]any) { ids = append(ids, id) }
+	path := writeZip(t, "mac.zip", zipped)
+	rep, err := importPath(path, formatAuto, perTurn, defaultExt, sink, func(msg string) { warnings = append(warnings, msg) }, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ids) != 1 || ids[0] != path+"!export/notes.md" {
+		t.Errorf("indexed %v, want notes.md alone", ids)
+	}
+	if len(warnings) != 0 {
+		t.Errorf("bundles in a zip are passed over silently: %v", warnings)
+	}
+	if rep["skipped_dirs"] != 9 {
+		t.Errorf("skipped_dirs %v, want the 8 bundles and node_modules", rep["skipped_dirs"])
 	}
 }
 
@@ -945,6 +1121,55 @@ func TestSeedPassesOverDependenciesAndIgnored(t *testing.T) {
 	res := decodeImportResult(t, out)
 	if res["written"] != float64(5) || res["skipped_files"] != float64(2) || res["skipped_dirs"] != float64(10) {
 		t.Errorf("seed: %v; want 5 written, 2 files and 10 folders skipped", res)
+	}
+	if err := cmdSeed([]string{"notes", dir, "--db", dbPath, "--json", "--ext", ".js"}); err == nil ||
+		!strings.Contains(err.Error(), "0 skipped, 10 folders passed over") {
+		t.Errorf("seed --ext .js should pass over what add does: %v", err)
+	}
+}
+
+// seed reads a folder as add does: the same documents, the same files and
+// folders passed over. It is handed a relative path here, which it must
+// not hand on to a converter as it is: "-ibis.eml" would reach mdimport as
+// an option.
+func TestSeedReadsWhatAddReads(t *testing.T) {
+	cache := ndjsonTestCache(t)
+	t.Setenv("TENNIS_CACHE", cache)
+	dir := macTree(t)
+	for name, body := range map[string]string{
+		"-ibis.eml": "From: joe@example.com\nSubject: ibis\n\nThe ibis flew south for the winter.\n",
+		"empty.md":  "", ".hidden.md": "not meant",
+	} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	sink := &docSink{capture: func(string, string, map[string]any) {}}
+	add, err := importPath(dir, formatAuto, perTurn, defaultExt, sink, func(string) {}, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	dbPath := filepath.Join(t.TempDir(), "seed.sqlite")
+	t.Chdir(dir)
+	out, err := captureStdout(t, func() error {
+		return cmdSeed([]string{"notes", ".", "--db", dbPath, "--json"})
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	seed := decodeImportResult(t, out)
+	if seed["written"] != float64(add["documents"].(int)) ||
+		seed["skipped_files"] != float64(add["skipped_files"].(int)) ||
+		seed["skipped_dirs"] != float64(add["skipped_dirs"].(int)) {
+		t.Errorf("seed %v; add %v", seed, add)
+	}
+	want := 1 // notes.md
+	if runtime.GOOS == "darwin" {
+		want = 3 // and the .rtfd and the mail, which the system reads
+	}
+	if add["documents"] != want {
+		t.Errorf("add indexed %v documents, want %d", add["documents"], want)
 	}
 }
 

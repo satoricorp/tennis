@@ -336,65 +336,101 @@ func cmdSeed(args []string) error {
 		}
 	}
 	for _, root := range paths {
-		ig := newIgnores(os.DirFS(root))
-		err := filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
+		// The walk runs on the absolute path, as add's does. The readers
+		// hand a file's path to a converter, and a relative one can begin
+		// with a dash: "-ibis.eml" reached mdimport as an option.
+		absRoot, err := filepath.Abs(root)
+		if err != nil {
+			return err
+		}
+		fsys := os.DirFS(absRoot)
+		ig := newIgnores(fsys)
+		err = filepath.WalkDir(absRoot, func(p string, d fs.DirEntry, err error) error {
 			if err != nil {
 				return err
 			}
 			// Hidden entries are skipped below the root, not at it: the
 			// folder a person names is the folder they mean.
-			rel, _ := filepath.Rel(root, p)
+			rel, _ := filepath.Rel(absRoot, p)
 			rel = filepath.ToSlash(rel)
+			shown := filepath.Join(root, filepath.FromSlash(rel))
 			if rel != "." && hidden(rel) {
 				if d.IsDir() {
 					return fs.SkipDir
 				}
 				return nil
 			}
-			// The folders add passes over, for the same reasons. Seed has
-			// no transcripts to look for, so a folder a .gitignore names is
-			// not entered either.
-			if d.IsDir() {
-				if (rel != "." && passOver[d.Name()]) || ig.dir(rel) != "" {
+			// The folders add passes over, for the same reasons, counted
+			// the same way. Seed has no transcripts to look for, so a
+			// folder a .gitignore names is not entered either, and nothing
+			// in it is counted again. A document saved as a folder goes on
+			// to be read as a file, named or found.
+			isDir := d.IsDir()
+			if isDir && !isDocument(d.Name()) {
+				isBundle, _ := bundle(d.Name())
+				switch {
+				case rel == ".":
+					ig.dir(rel)
+					return nil
+				case isBundle || passOver[d.Name()] || ig.dir(rel) != "":
 					skippedDirs++
 					return fs.SkipDir
 				}
 				return nil
 			}
-			if len(wanted) > 0 && !wanted[strings.ToLower(filepath.Ext(p))] {
-				return nil
-			}
-			if ig.file(rel) != "" {
-				skippedFiles++
+			// Past here is one file, or one document, and a folder that is
+			// one is never walked into.
+			done := func() error {
+				if isDir {
+					return fs.SkipDir
+				}
 				return nil
 			}
 			info, err := d.Info()
 			if err != nil {
 				return err
 			}
+			size, mod := info.Size(), info.ModTime()
+			switch {
+			case isDir:
+				size, mod = bundleStat(fsys, rel)
+			case info.Mode()&fs.ModeSymlink != 0:
+				// Measured as what it points to, which is what is read; a
+				// link to a folder is passed over, not followed.
+				if target, err := os.Stat(p); err == nil {
+					if target.IsDir() {
+						skippedDirs++
+						return nil
+					}
+					size, mod = target.Size(), target.ModTime()
+				}
+			}
+			if len(wanted) > 0 && !wanted[strings.ToLower(filepath.Ext(p))] {
+				return done()
+			}
+			if ig.check(rel, isDir) != "" {
+				skippedFiles++
+				return done()
+			}
 			text, err := fileText(fileEntry{
-				name: d.Name(), path: p, size: info.Size(),
+				name: d.Name(), path: p, size: size,
 				open: func() (io.ReadCloser, error) { return os.Open(p) },
 			})
 			if err != nil {
 				if errors.Is(err, errNotText) {
 					skippedFiles++
 				} else {
-					skip(p, err.Error())
+					skip(shown, err.Error())
 				}
-				return nil
-			}
-			abs, err := filepath.Abs(p)
-			if err != nil {
-				return fmt.Errorf("resolving absolute path for %s: %w", p, err)
+				return done()
 			}
 			attrs := map[string]any{
-				"path": abs, "name": d.Name(),
-				"modified": info.ModTime().UTC().Format(time.RFC3339),
-				"size":     info.Size(),
+				"path": p, "name": d.Name(),
+				"modified": mod.UTC().Format(time.RFC3339),
+				"size":     size,
 			}
-			docs = append(docs, tennis.Document{ID: abs, Text: text, Attributes: attrs})
-			return nil
+			docs = append(docs, tennis.Document{ID: p, Text: text, Attributes: attrs})
+			return done()
 		})
 		if err != nil {
 			return err
