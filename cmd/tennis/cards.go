@@ -83,13 +83,21 @@ type card struct {
 // that is missing, and gets written anyway.
 func (c card) digest() string {
 	meta, _ := json.Marshal(c.meta)
+	fallback := c.fallback
+	if c.kind == summarize.KindFile {
+		fallback = threeBacktickFence(fallback)
+	}
 	h := sha256.New()
-	for _, s := range []string{c.kind, c.source, c.id, c.title, c.stamp, strconv.Itoa(c.turns), string(meta), c.text, c.fallback} {
+	for _, s := range []string{c.kind, c.source, c.id, c.title, c.stamp, strconv.Itoa(c.turns), string(meta), c.text, fallback} {
 		io.WriteString(h, s)
 		h.Write([]byte{0})
 	}
 	return hex.EncodeToString(h.Sum(nil)[:8])
 }
+
+// session is what a conversation's card names in its frontmatter, and how
+// writeCard tells one conversation's card from another's.
+func (c card) session() string { return c.source + ":" + c.id }
 
 // card is the conversation as the card writer sees it.
 func (c conversation) card() card {
@@ -131,6 +139,11 @@ func fileCard(id, name, text string, modified time.Time, size int64) card {
 // code fence so a spreadsheet's rows stay rows on the card. The word budget
 // matches summarize.Fallback; the line cap keeps a sheet of one-word cells
 // from running on.
+//
+// The fence is longer than any run of backticks in the lines it holds. A
+// markdown file's opening often has a fence of its own, and a ``` line inside
+// a ``` fence closes it, leaving the rest of the excerpt as markdown and the
+// card's last line inside a code block.
 func excerpt(text string) string {
 	const maxWords, maxLines, maxLine = 60, 12, 120
 	var lines []string
@@ -153,7 +166,38 @@ func excerpt(text string) string {
 	if more {
 		lines = append(lines, "…")
 	}
-	return "```\n" + strings.Join(lines, "\n") + "\n```"
+	body := strings.Join(lines, "\n")
+	fence := strings.Repeat("`", max(3, longestRun(body, '`')+1))
+	return fence + "\n" + body + "\n" + fence
+}
+
+// longestRun is the length of the longest unbroken run of b in s.
+func longestRun(s string, b byte) int {
+	longest, run := 0, 0
+	for i := 0; i < len(s); i++ {
+		if s[i] != b {
+			run = 0
+			continue
+		}
+		run++
+		longest = max(longest, run)
+	}
+	return longest
+}
+
+// threeBacktickFence is an excerpt as it was fenced before the fence grew to
+// fit what it holds, which is the form a card's digest hashes. The fence is
+// layout, and a longer one is no reason to summarize those files again.
+func threeBacktickFence(fallback string) string {
+	if !strings.HasPrefix(fallback, "````") {
+		return fallback
+	}
+	fence, rest, _ := strings.Cut(fallback, "\n")
+	body, ok := strings.CutSuffix(rest, "\n"+fence)
+	if !ok {
+		return fallback
+	}
+	return "```\n" + body + "\n```"
 }
 
 // cardWriter turns cards into files in the background while the import keeps
@@ -173,6 +217,10 @@ type cardWriter struct {
 	// between here and there. Closing a channel twice panics, so which one
 	// gets there first must not matter.
 	once sync.Once
+
+	// files serializes choosing a card's name with writing it, so two workers
+	// cannot both find a name free and write over each other.
+	files sync.Mutex
 
 	mu        sync.Mutex
 	written   int
@@ -239,7 +287,7 @@ func (w *cardWriter) one(c card) {
 		return
 	}
 	text, by := c.fallback, ""
-	if w.sum != nil {
+	if w.sum != nil && strings.TrimSpace(c.text) != "" {
 		in := summarize.Input{
 			Kind:       c.kind,
 			Source:     c.source,
@@ -262,7 +310,10 @@ func (w *cardWriter) one(c card) {
 			fmt.Fprintf(os.Stderr, "tennis: summarizing %s: %v\n", c.id, err)
 		}
 	}
-	if err := writeCard(w.dir, c, text, by); err != nil {
+	w.files.Lock()
+	err := writeCard(w.dir, c, text, by)
+	w.files.Unlock()
+	if err != nil {
 		fmt.Fprintf(os.Stderr, "tennis: card for %s: %v\n", c.id, err)
 		return
 	}
@@ -272,25 +323,27 @@ func (w *cardWriter) one(c card) {
 }
 
 // current reports whether the card already on disk describes c: its digest
-// matches, and it carries a summary or there is still no model to write one.
-// So an unchanged conversation costs nothing, a card the person deleted comes
-// back, a card that fell back to the opening is summarized once a key is set
-// or the failure has passed, and a run with no key leaves the summaries an
-// earlier run paid for where they are. The person's own edits to a card's
-// body survive too, until what it describes changes.
+// matches, and it carries a summary or there is still no model to write one,
+// or nothing for one to read. So an unchanged conversation costs nothing, a
+// card the person deleted comes back, a card that fell back to the opening is
+// summarized once a key is set or the failure has passed, and a run with no
+// key leaves the summaries an earlier run paid for where they are. The
+// person's own edits to a card's body survive too, until what it describes
+// changes.
 func (w *cardWriter) current(c card) bool {
-	stem, _ := cardStem(c)
-	fm := frontmatter(filepath.Join(w.dir, stem+".md"))
+	path, _ := cardPath(w.dir, c)
+	fm := frontmatter(path)
 	if fm["digest"] != c.digest() {
 		return false
 	}
 	_, summarized := fm["summarizer"]
-	return summarized || w.sum == nil
+	return summarized || w.sum == nil || strings.TrimSpace(c.text) == ""
 }
 
-// frontmatter reads the block at the top of a card as raw key-value pairs. A
-// card that is missing, unreadable, or no longer opens with frontmatter reads
-// as empty, which means write it again.
+// frontmatter reads the block at the top of a card as key-value pairs, with
+// quoted values read back to the strings they quote. A card that is missing,
+// unreadable, or no longer opens with frontmatter reads as empty, which means
+// write it again.
 func frontmatter(path string) map[string]string {
 	f, err := os.Open(path)
 	if err != nil {
@@ -307,7 +360,7 @@ func frontmatter(path string) map[string]string {
 			return out
 		}
 		if k, v, ok := strings.Cut(sc.Text(), ":"); ok {
-			out[k] = strings.TrimSpace(v)
+			out[k] = yamlUnquote(strings.TrimSpace(v))
 		}
 	}
 	return nil
@@ -360,17 +413,19 @@ func attrText(m map[string]any, keys ...string) string {
 // writeCard writes or replaces the card. by names the model that wrote the
 // summary, and is empty when the card carries the opening instead.
 func writeCard(dir string, c card, summary, by string) error {
-	stem, prefix := cardStem(c)
-	path := filepath.Join(dir, stem+".md")
+	path, prefix := cardPath(dir, c)
 
 	// Sweep cards from an earlier import of this same conversation whose title
 	// — and therefore slug — has since changed. Claude Code names a session
 	// several turns in, so importing twice can produce two different names for
-	// one conversation. The timestamp-and-source prefix is stable.
+	// one conversation. The timestamp-and-source prefix is stable, but it is
+	// not unique: two conversations can start in the same second, and the
+	// prefix for claude is the start of the one for claude-code. So a card is
+	// swept only when its frontmatter names this same conversation.
 	if prefix != "" {
 		if stale, _ := filepath.Glob(filepath.Join(dir, prefix+"*.md")); len(stale) > 0 {
 			for _, s := range stale {
-				if s != path {
+				if s != path && frontmatter(s)["session"] == c.session() {
 					os.Remove(s)
 				}
 			}
@@ -379,9 +434,39 @@ func writeCard(dir string, c card, summary, by string) error {
 	return os.WriteFile(path, []byte(renderCard(c, summary, by)), 0o644)
 }
 
+// cardPath is where c's card goes, and the prefix its earlier names share.
+//
+// It is the name cardStem gives it, unless a different conversation already
+// holds that name — two that started in the same second with the same title.
+// Then the second one's name ends in a hash of its session, so neither writes
+// over the other. Only that collision is renamed: a new name for every card
+// would make every card already on disk look missing, and summarize the whole
+// folder again.
+func cardPath(dir string, c card) (path, prefix string) {
+	stem, prefix := cardStem(c)
+	path = filepath.Join(dir, stem+".md")
+	if prefix == "" {
+		return path, ""
+	}
+	alt := filepath.Join(dir, stem+"-"+shortHash(c.session())+".md")
+	switch holder := frontmatter(path)["session"]; {
+	case holder == c.session():
+		return path, prefix
+	case frontmatter(alt)["session"] == c.session():
+		return alt, prefix
+	case holder == "":
+		return path, prefix
+	default:
+		return alt, prefix
+	}
+}
+
 // cardStem is the filename without extension, plus the stable prefix used to
 // find earlier names for the same conversation. The volatile part — the title
 // slug — has to come last for that sweep to work.
+//
+// A conversation with no time at all is named undated rather than by when it
+// was imported, so it lands on the same card every time.
 //
 // A file's card is named by the file, not by when it was touched: the same
 // path has to land on the same card after every edit, and the hash keeps two
@@ -396,11 +481,10 @@ func cardStem(c card) (stem, prefix string) {
 		return name + "-" + shortHash(c.id), ""
 	}
 
-	ts := c.when
-	if ts.IsZero() {
-		ts = time.Now()
+	prefix = "undated-" + slug(c.source, 20) + "-"
+	if !c.when.IsZero() {
+		prefix = c.when.UTC().Format("2006-01-02-150405") + "-" + slug(c.source, 20) + "-"
 	}
-	prefix = ts.UTC().Format("2006-01-02-150405") + "-" + slug(c.source, 20) + "-"
 	if s := slug(c.title, 60); s != "" {
 		return prefix + s, prefix
 	}
@@ -446,7 +530,7 @@ func renderCard(c card, summary, by string) string {
 	if isFile {
 		fmt.Fprintf(&b, "file: %s\n", yamlString(c.id))
 	} else {
-		fmt.Fprintf(&b, "session: %s\n", yamlString(c.source+":"+c.id))
+		fmt.Fprintf(&b, "session: %s\n", yamlString(c.session()))
 	}
 	fmt.Fprintf(&b, "source: %s\n", c.source)
 	fmt.Fprintf(&b, "title: %s\n", yamlString(title))
@@ -501,18 +585,128 @@ func yamlScalar(v any) string {
 	}
 }
 
-// yamlString quotes a scalar when it would otherwise be misparsed. Titles are
-// arbitrary user text and routinely contain colons ("Bug: retry loop"), which
-// unquoted would turn one field into a nested map.
+// yamlString renders a scalar so that YAML reads back the same string.
+//
+// Titles are arbitrary user text. Unquoted, a colon ("Bug: retry loop") turns
+// one field into a nested map, a leading "- " or "? " or "[" starts a sequence,
+// a key or a flow collection, and a control character is not allowed at all —
+// a YAML parser rejects the whole block, and the card with it. A value that
+// would read as something other than a string, like yes, null or 2024, is
+// quoted too. Anything in doubt is double-quoted, where a backslash escapes the
+// rest; quoting what did not need it costs nothing.
 func yamlString(s string) string {
-	s = strings.ReplaceAll(s, "\n", " ")
 	if s == "" {
 		return `""`
 	}
-	if strings.ContainsAny(s, `:#{}[]&*!|>'"%@`+"`") || strings.TrimSpace(s) != s {
-		return `"` + strings.ReplaceAll(strings.ReplaceAll(s, `\`, `\\`), `"`, `\"`) + `"`
+	if yamlPlain(s) {
+		return s
 	}
-	return s
+	var b strings.Builder
+	b.WriteByte('"')
+	for _, r := range s {
+		switch {
+		case r == '\\':
+			b.WriteString(`\\`)
+		case r == '"':
+			b.WriteString(`\"`)
+		case r == '\n':
+			b.WriteString(`\n`)
+		case r == '\r':
+			b.WriteString(`\r`)
+		case r == '\t':
+			b.WriteString(`\t`)
+		case yamlEscaped(r):
+			fmt.Fprintf(&b, `\u%04X`, r)
+		default:
+			b.WriteRune(r)
+		}
+	}
+	b.WriteByte('"')
+	return b.String()
+}
+
+// yamlPlain reports whether s can be written as it is: no indicator to open
+// it, nothing in it a parser would stop at, nothing that resolves to another
+// type, and no space at either end for a parser to trim.
+func yamlPlain(s string) bool {
+	// An indicator, or the first character of a number or a date.
+	if strings.TrimSpace(s) != s || strings.ContainsAny(s[:1], "-?:,[]{}#&*!|>'\"%@`"+".+0123456789") {
+		return false
+	}
+	if strings.ContainsAny(s, `:#{}[]&*!|>'"%@`+"`") {
+		return false
+	}
+	switch strings.ToLower(s) {
+	case "~", "null", "true", "false", "yes", "no", "on", "off", "y", "n", "<<", "=":
+		return false
+	}
+	for _, r := range s {
+		if r == '\t' || yamlEscaped(r) {
+			return false
+		}
+	}
+	return true
+}
+
+// yamlEscaped reports whether r has to be written as an escape: a control
+// character, a character YAML reads as a line break, or one outside the set a
+// YAML stream may carry at all.
+func yamlEscaped(r rune) bool {
+	switch {
+	case r < 0x20, r == 0x7F, r >= 0x80 && r <= 0x9F:
+		return true
+	case r == 0x2028, r == 0x2029, r >= 0xD800 && r <= 0xDFFF, r == 0xFFFE, r == 0xFFFF:
+		return true
+	}
+	return false
+}
+
+// yamlUnquote reads back a scalar yamlString wrote, and a single-quoted one a
+// person may have written by hand. Anything else, including a quoted value
+// with an escape it does not know, is returned as it stands.
+func yamlUnquote(v string) string {
+	if len(v) < 2 {
+		return v
+	}
+	switch q := v[0]; {
+	case q == '\'' && v[len(v)-1] == '\'':
+		return strings.ReplaceAll(v[1:len(v)-1], "''", "'")
+	case q != '"' || v[len(v)-1] != '"':
+		return v
+	}
+	var b strings.Builder
+	in := v[1 : len(v)-1]
+	for i := 0; i < len(in); i++ {
+		if in[i] != '\\' {
+			b.WriteByte(in[i])
+			continue
+		}
+		if i++; i == len(in) {
+			return v
+		}
+		if r, ok := yamlEscapes[in[i]]; ok {
+			b.WriteRune(r)
+			continue
+		}
+		digits := map[byte]int{'x': 2, 'u': 4, 'U': 8}[in[i]]
+		if digits == 0 || i+1+digits > len(in) {
+			return v
+		}
+		n, err := strconv.ParseUint(in[i+1:i+1+digits], 16, 32)
+		if err != nil {
+			return v
+		}
+		b.WriteRune(rune(n))
+		i += digits
+	}
+	return b.String()
+}
+
+// yamlEscapes are YAML's one-character escapes inside double quotes.
+var yamlEscapes = map[byte]rune{
+	'0': 0, 'a': '\a', 'b': '\b', 't': '\t', '\t': '\t', 'n': '\n', 'v': '\v', 'f': '\f',
+	'r': '\r', 'e': 0x1B, ' ': ' ', '"': '"', '/': '/', '\\': '\\',
+	'N': 0x85, '_': 0xA0, 'L': 0x2028, 'P': 0x2029,
 }
 
 func firstLine(s string, max int) string {

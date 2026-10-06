@@ -8,6 +8,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"slices"
+	"sort"
 	"strings"
 	"sync"
 	"testing"
@@ -98,6 +100,151 @@ func TestCardSweepsStaleTitle(t *testing.T) {
 	}
 	if !strings.Contains(entries[0].Name(), "the-eventual-title") {
 		t.Errorf("surviving card is %q, want the current title", entries[0].Name())
+	}
+}
+
+// TestCardsStartedInTheSameSecondKeepTheirOwn: the sweep for a retitled
+// session finds earlier names by their time-and-source prefix, which two
+// conversations started in the same second share — and the prefix for claude
+// is the start of the one for claude-code. Sweeping on the prefix alone, each
+// card written deleted the others, so every later add wrote one of them again
+// (a model call, with a key) and deleted another, for good.
+func TestCardsStartedInTheSameSecondKeepTheirOwn(t *testing.T) {
+	dir := t.TempDir()
+	agent := conv("Fix the build", user("the build is broken"))
+	agent.id = "S7"
+	cookies := conv("Session cookies", user("keep me signed in"))
+	cookies.source, cookies.id = "claude", "cc1"
+	limits := conv("Rate limits", user("how do I back off on a 429"))
+	limits.source, limits.id = "claude", "cc2"
+	// The same second and the same title: the same name, unless one gives way.
+	twin := conv("Session cookies", user("and on mobile?"))
+	twin.source, twin.id = "claude", "cc3"
+
+	run := func(cs ...conversation) (*cardWriter, *recordingSummarizer) {
+		t.Helper()
+		rec := &recordingSummarizer{}
+		w, err := newCardWriter(t.Context(), dir, rec)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, c := range cs {
+			w.add(c.card())
+		}
+		w.close()
+		return w, rec
+	}
+	// One at a time, as separate adds would, so each card is on disk before
+	// the next is written.
+	for _, c := range []conversation{agent, cookies, limits, twin} {
+		run(c)
+	}
+	sessions := func() []string {
+		t.Helper()
+		entries, _ := os.ReadDir(dir)
+		var out []string
+		for _, e := range entries {
+			out = append(out, frontmatter(filepath.Join(dir, e.Name()))["session"])
+		}
+		sort.Strings(out)
+		return out
+	}
+	want := []string{"claude-code:S7", "claude:cc1", "claude:cc2", "claude:cc3"}
+	if got := sessions(); !slices.Equal(got, want) {
+		t.Fatalf("cards on disk are for %v, want one each for %v", got, want)
+	}
+	if w, rec := run(agent, cookies, limits, twin); len(rec.seen) != 0 || w.written != 0 || w.unchanged != 4 {
+		t.Errorf("re-add: %d summaries, %d written, %d unchanged; want 0, 0, 4", len(rec.seen), w.written, w.unchanged)
+	}
+
+	// Only the collision is renamed; the first card keeps the name it had.
+	stem, _ := cardStem(cookies.card())
+	if _, err := os.Stat(filepath.Join(dir, stem+".md")); err != nil {
+		t.Errorf("the first card for a name lost it: %v", err)
+	}
+	if frontmatter(filepath.Join(dir, stem+"-"+shortHash("claude:cc3")+".md"))["session"] != "claude:cc3" {
+		t.Errorf("the second card for a name is not beside it under a hash of its session")
+	}
+
+	// A retitle still sweeps the conversation's own old card, and only that.
+	limits.title = "Backoff on 429"
+	if w, _ := run(limits); w.written != 1 {
+		t.Fatalf("a retitled conversation was not written again")
+	}
+	if got := sessions(); !slices.Equal(got, want) {
+		t.Errorf("after a retitle, cards on disk are for %v, want %v", got, want)
+	}
+
+	// Written at once, by different workers, two conversations that want the
+	// same name both get a card.
+	dir = t.TempDir()
+	run(cookies, twin)
+	if got := sessions(); !slices.Equal(got, []string{"claude:cc1", "claude:cc3"}) {
+		t.Errorf("written together, the cards are for %v", got)
+	}
+}
+
+// TestUndatedCardKeepsItsName: a conversation with no time anywhere in it used
+// to be named by when it was imported, so every add wrote it a new card and
+// left the last one behind.
+func TestUndatedCardKeepsItsName(t *testing.T) {
+	dir := t.TempDir()
+	c := conv("No dates here", user("hello"))
+	c.create = ""
+	stem, prefix := cardStem(c.card())
+	if prefix != "undated-claude-code-" || stem != "undated-claude-code-no-dates-here" {
+		t.Errorf("undated conversation is named %q (prefix %q)", stem, prefix)
+	}
+	for i := 0; i < 2; i++ {
+		w, err := newCardWriter(t.Context(), dir, &recordingSummarizer{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		w.add(c.card())
+		w.close()
+	}
+	if entries, _ := os.ReadDir(dir); len(entries) != 1 {
+		t.Errorf("two adds of an undated conversation left %d cards", len(entries))
+	}
+}
+
+// TestCardWriterSkipsEmptyText: with nothing to read, a model call is spent
+// on a summary of nothing. The card carries its fallback, and is not written
+// again on every add for want of a summary it will never get.
+func TestCardWriterSkipsEmptyText(t *testing.T) {
+	dir := t.TempDir()
+	c := fileCard("/n/blank.md", "blank.md", " \n\t\n", time.Time{}, 4)
+	for i, wantWritten := range []int{1, 0} {
+		rec := &recordingSummarizer{}
+		w, err := newCardWriter(t.Context(), dir, rec)
+		if err != nil {
+			t.Fatal(err)
+		}
+		w.add(c)
+		w.close()
+		if len(rec.seen) != 0 || w.written != wantWritten {
+			t.Errorf("add %d: %d summaries, %d written; want 0 and %d", i+1, len(rec.seen), w.written, wantWritten)
+		}
+	}
+}
+
+// TestCardDigestIsStable: the digest decides whether a card is written again,
+// and with a key set every card written again is a model call. These are the
+// digests the cards on disk already carry; a change to how cards look, or to
+// how an excerpt is fenced, must not move them.
+func TestCardDigestIsStable(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		card card
+		want string
+	}{
+		{"conversation", conv("Bug: retry loop", user("why does this hang"), assistant("the backoff never resets")).card(), "fdba5dcdf30f5711"},
+		{"file with a fence in it", fileCard("/n/readme.md", "readme.md", "# Readme\n\n```go\nfunc main() {}\n```\n\nmore ````` here\n", time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC), 99), "cea3ff9c4da8addf"},
+		{"file", fileCard("/n/plain.csv", "plain.csv", "a,b\n1,2\n", time.Time{}, 8), "8ad2c697f5a40f4b"},
+	} {
+		if got := c.card.digest(); got != c.want {
+			t.Errorf("%s: digest %s, want %s as before", c.name, got, c.want)
+		}
 	}
 }
 
@@ -328,6 +475,91 @@ func TestExcerptIsBounded(t *testing.T) {
 	}
 	if got := excerpt("one\ntwo"); strings.Contains(got, "…") {
 		t.Errorf("a short file was marked as cut:\n%s", got)
+	}
+}
+
+// TestExcerptFenceOutlastsItsContents: a markdown file's opening often holds
+// a fence of its own, and a ``` line inside a ``` fence closes it — the rest of
+// the excerpt became markdown and the card's last line landed in a code block.
+func TestExcerptFenceOutlastsItsContents(t *testing.T) {
+	for _, c := range []struct{ text, fence string }{
+		{"plain\nlines", "```"},
+		{"one `tick` and two ``ticks``", "```"},
+		{"# Setup\n```sh\nmake\n```\nthen run it", "````"},
+		{"````\nnested\n````", "`````"},
+	} {
+		got := excerpt(c.text)
+		lines := strings.Split(got, "\n")
+		if lines[0] != c.fence || lines[len(lines)-1] != c.fence {
+			t.Errorf("excerpt of %q is fenced %q ... %q, want %q", c.text, lines[0], lines[len(lines)-1], c.fence)
+		}
+		// No line inside may close the fence: a run of backticks as long as
+		// the fence, alone on its line.
+		for _, l := range lines[1 : len(lines)-1] {
+			if strings.HasPrefix(strings.TrimSpace(l), c.fence) {
+				t.Errorf("excerpt of %q closes early at %q:\n%s", c.text, l, got)
+			}
+		}
+		if got := threeBacktickFence(got); !strings.HasPrefix(got, "```\n") || !strings.HasSuffix(got, "\n```") {
+			t.Errorf("the digest's form of %q is not in a three-backtick fence:\n%s", c.text, got)
+		}
+	}
+}
+
+// TestFrontmatterRoundTrips: whatever a title or a path holds, the card's own
+// reader gets the same string back — the sweep and the check for a card that
+// is already current both depend on it — and the block stays YAML that a
+// strict parser accepts: no bare indicator at the start of a value, and no
+// control character anywhere.
+func TestFrontmatterRoundTrips(t *testing.T) {
+	values := []string{
+		"Bug: retry loop never exits",
+		`say "hello"`, `it's`, "back\\slash", `C:\Users\joe`,
+		"line one\nline two", "tab\there", "carriage\rreturn", "nul\x00byte", "del\x7f", "bell\a",
+		"- fix the login bug", "? why", ": colon first", ", comma first", "[draft] notes", "{x}",
+		"# not a comment", "&anchor", "*alias", "!tag", "| literal", "> folded", "'quoted", `"quoted`,
+		"%directive", "@at", "`tick`", "...", "---",
+		"yes", "No", "null", "~", "true", "2024", "3.5", "+1", ".5", "<<", "=",
+		" leading space", "trailing space ", "next\u0085line", "line\u2028separator",
+		"日本語のタイトル", "tennis 🎾 ball", "plain words, with a comma", "a-b_c.d",
+	}
+	dir := t.TempDir()
+	for i, v := range values {
+		c := conv(v, user("hi"))
+		c.extra = map[string]any{"cwd": v}
+		path := filepath.Join(dir, fmt.Sprintf("%02d.md", i))
+		body := renderCard(c.card(), "", "")
+		if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		fm := frontmatter(path)
+		if fm["title"] != v || fm["cwd"] != v {
+			t.Errorf("%q came back as title %q, cwd %q:\n%s", v, fm["title"], fm["cwd"], body)
+		}
+		head, _, _ := strings.Cut(strings.TrimPrefix(body, "---\n"), "\n---\n")
+		for _, line := range strings.Split(head, "\n") {
+			_, val, _ := strings.Cut(line, ": ")
+			if val != "" && strings.ContainsAny(val[:1], "-?:,[]{}#&*!|>'%@`") {
+				t.Errorf("%q starts a value with an indicator: %q", v, line)
+			}
+			for _, r := range line {
+				if r < 0x20 || r == 0x7f || (r >= 0x80 && r <= 0x9f) || r == 0x2028 {
+					t.Errorf("%q left control character %U in %q", v, r, line)
+				}
+			}
+		}
+	}
+	// A person editing a card may quote a value in single quotes.
+	if got := yamlUnquote(`'it''s'`); got != "it's" {
+		t.Errorf("single-quoted value read as %q", got)
+	}
+	// An escape the reader does not know leaves the value as it stands rather
+	// than guessing.
+	if got := yamlUnquote(`"bad \q escape"`); got != `"bad \q escape"` {
+		t.Errorf("unknown escape read as %q", got)
+	}
+	if got := yamlUnquote(`"short \u12"`); got != `"short \u12"` {
+		t.Errorf("short escape read as %q", got)
 	}
 }
 
