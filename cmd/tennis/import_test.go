@@ -76,10 +76,10 @@ const codexSession = `{"timestamp":"2026-06-09T19:25:07.702Z","type":"session_me
 
 // What a real ~/.codex and ~/.claude keep beside their transcripts: a
 // history.jsonl at the root, which a lexical walk visits first. Codex also
-// writes a session_index.jsonl there. None of it is in a transcript shape,
-// with one partial exception: lines Claude Code writes today carry a
-// sessionId (see claudeCodeHistory, below), lines older versions wrote do
-// not, and the sniffer reads the first few lines, which are the oldest.
+// writes a session_index.jsonl there. None of it is in a transcript shape.
+// Some Claude Code history lines carry a sessionId (see claudeCodeHistory,
+// below) and some do not, but none carries a message, and a sessionId alone
+// is not a transcript.
 const codexHistory = `{"session_id":"S9","ts":1749497108,"text":"what hotel did we stay at in Mexico"}
 `
 
@@ -88,6 +88,26 @@ const codexSessionIndex = `{"id":"S9","thread_name":"Hotel in Mexico","updated_a
 
 const claudeCodeHistoryNoSessionID = `{"display":"the auth test is flaky","pastedContents":{},"project":"/Users/joe/git/x","timestamp":1786938424866}
 `
+
+// A Claude Code transcript as one is written today: bookkeeping records —
+// more of them than the sniffer once read — ahead of the first turn.
+const claudeCodeBookkeeping = `{"type":"queue-operation","operation":"enqueue","sessionId":"S2","timestamp":"2026-08-01T10:00:00.000Z","content":"hi"}
+{"type":"queue-operation","operation":"dequeue","sessionId":"S2","timestamp":"2026-08-01T10:00:00.000Z"}
+{"type":"mode","mode":"default","sessionId":"S2"}
+{"type":"permission-mode","permissionMode":"default","sessionId":"S2"}
+{"type":"ai-title","aiTitle":"Say hello","sessionId":"S2"}
+{"type":"file-history-snapshot","messageId":"m0","snapshot":{},"isSnapshotUpdate":false}
+{"type":"attachment","uuid":"x0","sessionId":"S2","attachment":{}}
+{"type":"user","uuid":"u1","sessionId":"S2","timestamp":"2026-08-01T10:00:01.000Z","message":{"role":"user","content":"hi"}}
+`
+
+// A folder of notes holding JSONL that is no transcript but carries an id a
+// transcript line does: an event log keyed by uuid, with a type.
+var eventLogFolder = map[string]string{
+	"README.md":         "# Field notes\nthe heron nests by the culvert",
+	"data/a.jsonl":      `{"x":1}` + "\n",
+	"data/events.jsonl": `{"type":"page_view","uuid":"e1"}` + "\n",
+}
 
 // writeZip builds a zip from a name -> content map and returns its path.
 func writeZip(t *testing.T, name string, files map[string]string) string {
@@ -174,6 +194,15 @@ func TestDetectFormats(t *testing.T) {
 			"history.jsonl":          claudeCodeHistoryNoSessionID,
 			"projects/repo/S1.jsonl": claudeCodeSession,
 		}, formatClaudeCode},
+		{"claude code transcript behind bookkeeping", map[string]string{"projects/repo/S2.jsonl": claudeCodeBookkeeping}, formatClaudeCode},
+		// The first JSONL a sniffer claims decides the format for the whole
+		// source, so a line with an id in it is not enough: it has to be a
+		// conversation record.
+		{"claude code history alone", map[string]string{"history.jsonl": claudeCodeHistory}, formatFiles},
+		{"event log among notes", eventLogFolder, formatFiles},
+		{"codex envelope without a timestamp", map[string]string{
+			"logs/stream.jsonl": `{"type":"event_msg","payload":{"type":"click"}}` + "\n",
+		}, formatFiles},
 		{"plain files", map[string]string{"notes/a.md": "# hello", "notes/b.txt": "world"}, formatFiles},
 		{"nested export still found", map[string]string{"export-2026/conversations.json": claudeExport}, formatClaude},
 	}
@@ -1106,8 +1135,8 @@ func TestImportCodexResumedSessionKeepsItsOwnID(t *testing.T) {
 
 // ~/.claude holds history.jsonl beside the transcripts: the record of prompts
 // typed, with epoch-millisecond timestamps and a sessionId on every line. The
-// sessionId makes it sniff as a transcript, so the reader gets handed it and
-// must decline it quietly rather than report every line as a parse error.
+// reader is handed it along with the transcripts it sits beside, and must
+// decline it quietly rather than report every line as a parse error.
 const claudeCodeHistory = `{"display":"ok, commit to main","pastedContents":{},"timestamp":1786938424866,"project":"/Users/joe/git/yeet","sessionId":"04b2d7d3-2a75-4486-b837-3e0d01992d76"}
 {"display":"now push it","pastedContents":{},"timestamp":1786938500000,"project":"/Users/joe/git/yeet","sessionId":"04b2d7d3-2a75-4486-b837-3e0d01992d76"}
 `
@@ -1255,5 +1284,82 @@ func TestAddBadOnlyPathPrintsNoReport(t *testing.T) {
 	}
 	if strings.TrimSpace(out) != "" {
 		t.Errorf("nothing was read, so nothing should be reported; stdout was %q", out)
+	}
+}
+
+// A folder of notes can hold JSONL that passes for a transcript — a fixture,
+// a stub — and detection, which settles on the first such file, then reads
+// the whole folder as transcripts and finds no conversation in it. That is a
+// wrong guess, not an empty source: the folder is read as plain files after
+// all, and the run says so. Named explicitly, the format is taken at its word.
+func TestAddReadsPlainFilesWhenNoTranscriptTurnsUp(t *testing.T) {
+	cache := ndjsonTestCache(t)
+	t.Setenv("TENNIS_CACHE", cache)
+	t.Setenv("TENNIS_CARDS", t.TempDir())
+	t.Setenv("ANTHROPIC_API_KEY", "")
+	t.Setenv("OPENAI_API_KEY", "")
+
+	for _, tc := range []struct {
+		name, flag, reading, stub string
+	}{
+		// A turn that is nothing but a tool result, which is not indexed.
+		{"claude code", "--claude-code", "reading Claude Code session transcripts",
+			`{"type":"user","uuid":"t1","sessionId":"S1","message":{"role":"user","content":[{"type":"tool_result","content":"ok"}]}}` + "\n"},
+		// Telemetry, and nothing said.
+		{"codex", "--codex", "reading Codex session transcripts",
+			`{"timestamp":"2026-06-09T19:25:07.716Z","type":"event_msg","payload":{"type":"task_started","turn_id":"t1"}}` + "\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := writeTree(t, map[string]string{
+				"README.md":              "# Field notes\nthe heron nests by the culvert",
+				"fixtures/session.jsonl": tc.stub,
+			})
+			dbPath := filepath.Join(t.TempDir(), "add.sqlite")
+			add := func(args ...string) (string, error) {
+				t.Helper()
+				return captureStderr(t, func() error {
+					_, err := captureStdout(t, func() error {
+						return cmdAdd(append([]string{"--db", dbPath, "--ns", "notes", "--no-cards"}, args...))
+					})
+					return err
+				})
+			}
+
+			stderr, err := add(dir)
+			if err != nil {
+				t.Fatalf("add: %v\nstderr: %s", err, stderr)
+			}
+			if !strings.Contains(stderr, tc.reading) || !strings.Contains(stderr, "no transcripts after all; reading plain files") {
+				t.Errorf("the run should say what it guessed and that it read plain files instead:\n%s", stderr)
+			}
+
+			out, err := captureStdout(t, func() error {
+				return cmdLS([]string{"--db", dbPath, "--json", "--docs", "--ns", "notes"})
+			})
+			if err != nil {
+				t.Fatalf("ls: %v\noutput: %s", err, out)
+			}
+			var docs []map[string]any
+			if err := json.Unmarshal([]byte(out), &docs); err != nil {
+				t.Fatalf("ls --json did not parse: %v\noutput: %s", err, out)
+			}
+			var readme bool
+			for _, d := range docs {
+				if d["id"] == filepath.Join(dir, "README.md") {
+					readme = true
+				}
+			}
+			if !readme {
+				t.Errorf("README.md was not indexed: %v", docs)
+			}
+
+			stderr, err = add(tc.flag, dir)
+			if err == nil || !strings.Contains(err.Error(), "nothing to import") {
+				t.Errorf("%s names the format, so a source with no conversation in it is an error; got %v\nstderr: %s", tc.flag, err, stderr)
+			}
+			if strings.Contains(stderr, "reading plain files") {
+				t.Errorf("%s should not fall back to plain files:\n%s", tc.flag, stderr)
+			}
+		})
 	}
 }

@@ -408,6 +408,23 @@ func importPath(p, format, per, ext string, sink *docSink, warn func(string), qu
 	}
 
 	docs := sink.count() - before
+	if docs == 0 && failed == 0 && format == formatAuto && (pl.format == formatClaudeCode || pl.format == formatCodex) {
+		// Detection settles on the first JSONL that looks like a transcript,
+		// and a folder of notes can hold one that only looks the part — an
+		// event log, a fixture. When nothing in the source turned out to be a
+		// conversation, the guess was wrong rather than the source empty, so
+		// it is read the way any other folder is. Named explicitly, the
+		// format is taken at its word and the error below stands.
+		if !quiet {
+			fmt.Fprintf(os.Stderr, "tennis: %s: no transcripts after all; reading plain files\n", a.display)
+		}
+		pl = plan{format: formatFiles}
+		skippedFiles, skippedDirs, err = importFiles(a, ext, sink, warn)
+		if err != nil {
+			return nil, err
+		}
+		docs = sink.count() - before
+	}
 	if docs == 0 && failed == 0 {
 		// Silence here would look like success. It never is: either the archive
 		// is not what it looked like, or the filter excluded everything in it.
@@ -627,6 +644,11 @@ func (a *archive) detect(want string) (plan, error) {
 	// transcript. Keep going past what neither sniffer claims, within a
 	// bound that keeps a tree of unrelated JSONL cheap. Each sniff gets its
 	// own handle because sniffing consumes the reader.
+	//
+	// The first file claimed decides the format for the whole source, which
+	// is why the sniffers want a line that is a conversation record and not
+	// merely a line with an id in it — and why importPath reads the source
+	// as plain files after all when the claim yields no conversation.
 	sniffed := 0
 	for _, e := range a.entries {
 		if !strings.EqualFold(path.Ext(e.path), ".jsonl") {
@@ -692,43 +714,72 @@ func sniffConversations(r io.Reader) (string, error) {
 	return "", fmt.Errorf(`no "mapping" (ChatGPT) or "chat_messages" (Claude) in the first conversation`)
 }
 
-// sniffClaudeCode looks for the fields every session transcript line carries.
-// It reads a few lines rather than one because the first can be a summary
-// record written by a later session.
+// sniffClaudeCode looks for a line that is a conversation record: one that
+// carries a message with a role, or that is typed as a turn and has the uuid
+// every turn is filed under. Either field alone is common in JSONL that is no
+// transcript at all — an event log keyed by uuid, or the history.jsonl beside
+// the transcripts, which may carry a sessionId but never a message — and a
+// match here decides the format for the whole source.
+//
+// It reads several lines rather than one because a transcript opens with
+// bookkeeping (queue operations, the permission mode, a file-history
+// snapshot, a title) before the first turn.
 func sniffClaudeCode(r io.Reader) bool {
 	sc := bufio.NewScanner(r)
 	sc.Buffer(make([]byte, 64*1024), maxImportLineSize)
-	for i := 0; i < 5 && sc.Scan(); i++ {
+	for i := 0; i < maxSniffLines && sc.Scan(); i++ {
 		var probe struct {
 			Type      string `json:"type"`
 			UUID      string `json:"uuid"`
 			SessionID string `json:"sessionId"`
+			Summary   string `json:"summary"`
+			LeafUUID  string `json:"leafUuid"`
+			Message   *struct {
+				Role string `json:"role"`
+			} `json:"message"`
 		}
 		if json.Unmarshal(sc.Bytes(), &probe) != nil {
 			continue
 		}
-		if probe.SessionID != "" || (probe.UUID != "" && probe.Type != "") {
+		if probe.SessionID != "" && probe.Message != nil && probe.Message.Role != "" {
 			return true
+		}
+		switch probe.Type {
+		case "user", "assistant", "system":
+			if probe.UUID != "" {
+				return true
+			}
+		case "summary":
+			// The summary a later session writes at the top of an earlier
+			// one's file points at the turn it ends on, and has no uuid of its
+			// own.
+			if probe.UUID != "" || (probe.Summary != "" && probe.LeafUUID != "") {
+				return true
+			}
 		}
 	}
 	return false
 }
 
-// sniffCodex looks for the envelope every rollout line is wrapped in. Codex
-// records no uuid or sessionId, which is exactly what sniffClaudeCode keys on,
-// so the two never claim the same file.
+// sniffCodex looks for the envelope every rollout line is wrapped in: a
+// timestamp, a type from the rollout's own few, and an object payload. The
+// type and payload alone are a shape plenty of event logs share; the
+// timestamp beside them is what every rollout line has and they often do not.
+// Codex records no uuid or message role, which is what sniffClaudeCode keys
+// on, so the two never claim the same file.
 func sniffCodex(r io.Reader) bool {
 	sc := bufio.NewScanner(r)
 	sc.Buffer(make([]byte, 64*1024), maxImportLineSize)
-	for i := 0; i < 5 && sc.Scan(); i++ {
+	for i := 0; i < maxSniffLines && sc.Scan(); i++ {
 		var probe struct {
-			Type    string          `json:"type"`
-			Payload json.RawMessage `json:"payload"`
+			Timestamp string          `json:"timestamp"`
+			Type      string          `json:"type"`
+			Payload   json.RawMessage `json:"payload"`
 		}
 		if json.Unmarshal(sc.Bytes(), &probe) != nil {
 			continue
 		}
-		if len(probe.Payload) == 0 {
+		if probe.Timestamp == "" || len(probe.Payload) == 0 || probe.Payload[0] != '{' {
 			continue
 		}
 		switch probe.Type {
@@ -738,6 +789,11 @@ func sniffCodex(r io.Reader) bool {
 	}
 	return false
 }
+
+// maxSniffLines is how far into a JSONL file a sniffer reads for a line in
+// its shape. A real Claude Code transcript puts up to a handful of
+// bookkeeping records ahead of its first turn.
+const maxSniffLines = 20
 
 // maxImportLineSize bounds one transcript line. Agent transcripts embed whole
 // file reads and command output, so the ceiling is well above what a message
