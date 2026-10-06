@@ -134,6 +134,17 @@ func TestHTMLText(t *testing.T) {
 	if got != want {
 		t.Errorf("htmlText:\n%q\nwant:\n%q", got, want)
 	}
+
+	// In XHTML a script with nothing in it closes itself, and what follows
+	// it up to the next script's end is the page, not more script.
+	xhtml := `<?xml version="1.0" encoding="utf-8"?>
+<html xmlns="http://www.w3.org/1999/xhtml"><head><title>Trip</title><script type="text/javascript" src="a.js"/><style type="text/css" /></head>
+<body><h1>Tulum</h1><p>We stayed at Hotel Esencia.</p><script>var x = 1;</script><p>Back on the 16th.</p><style>p{}</style></body></html>`
+	got, err = htmlText([]byte(xhtml))
+	want = "Trip\n\nTulum\n\nWe stayed at Hotel Esencia.\n\nBack on the 16th."
+	if err != nil || got != want {
+		t.Errorf("htmlText of XHTML with a self-closing script:\n%q, %v\nwant:\n%q", got, err, want)
+	}
 }
 
 // TestEPUBText: a book is its spine's pages in spine order — not the
@@ -176,6 +187,34 @@ func TestEPUBText(t *testing.T) {
 	}
 	if _, err := epubText(zipOf(t, map[string]string{"OEBPS/text/departure.xhtml": "x"})); err == nil {
 		t.Error("a zip with no container.xml passed as a book")
+	}
+}
+
+// TestEPUBTextPassesOverAMissingPage: a page the spine names and the
+// manifest does not list, or the manifest lists and the zip does not hold,
+// costs that page and not the book; a book none of whose pages can be read
+// is refused with the reason for the first.
+func TestEPUBTextPassesOverAMissingPage(t *testing.T) {
+	book := func(pages map[string]string) []byte {
+		parts := map[string]string{
+			"META-INF/container.xml": `<container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container"><rootfiles><rootfile full-path="content.opf"/></rootfiles></container>`,
+			"content.opf": `<package xmlns="http://www.idpf.org/2007/opf" version="3.0"><manifest>
+<item id="one" href="one.xhtml" media-type="application/xhtml+xml"/>
+<item id="gone" href="gone.xhtml" media-type="application/xhtml+xml"/>
+<item id="two" href="two.xhtml" media-type="application/xhtml+xml"/>
+</manifest><spine><itemref idref="one"/><itemref idref="gone"/><itemref idref="unlisted"/><itemref idref="two"/></spine></package>`,
+		}
+		for name, body := range pages {
+			parts[name] = `<html xmlns="http://www.w3.org/1999/xhtml"><body><p>` + body + `</p></body></html>`
+		}
+		return zipOf(t, parts)
+	}
+	got, err := epubText(book(map[string]string{"one.xhtml": "Leaving Austin.", "two.xhtml": "Arriving in Tulum."}))
+	if want := "Leaving Austin.\n\nArriving in Tulum."; err != nil || got != want {
+		t.Errorf("a book with two pages missing:\n%q, %v\nwant:\n%q", got, err, want)
+	}
+	if _, err := epubText(book(nil)); err == nil || !strings.Contains(err.Error(), "no one.xhtml in the book") {
+		t.Errorf("a book with no page to read should say why, got %v", err)
 	}
 }
 

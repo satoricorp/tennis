@@ -315,7 +315,11 @@ func tidy(s string) string {
 // --- HTML -------------------------------------------------------------------
 
 var (
-	htmlDrop  = regexp.MustCompile(`(?is)<(script|style|noscript|template)\b.*?</(script|style|noscript|template)\s*>|<!--.*?-->`)
+	// In XHTML, which is what an EPUB's pages are, a script or style with
+	// nothing in it may close itself: <script src="a.js"/>. That has to be
+	// matched first, or the match runs on to the next </script> and takes
+	// the page between them with it.
+	htmlDrop  = regexp.MustCompile(`(?is)<(?:script|style|noscript|template)\b[^>]*/>|<(script|style|noscript|template)\b.*?</(script|style|noscript|template)\s*>|<!--.*?-->`)
 	htmlBlock = regexp.MustCompile(`(?i)</?(p|div|br|hr|li|ul|ol|h[1-6]|tr|td|th|table|section|article|header|footer|blockquote|pre|dd|dt|dl|figure|figcaption|nav|aside|main|form|fieldset|address|details|summary|title)\b[^>]*>`)
 	htmlTag   = regexp.MustCompile(`<[^>]*>`)
 )
@@ -405,21 +409,16 @@ func epubText(body []byte) (string, error) {
 	// Pages compress well, so the cap on the zip is no cap on what they
 	// expand to; open holds them to the cap the file was, and their text is
 	// held to the text cap as it comes.
-	var pages []string
-	size := 0
-	for _, ref := range pkg.Spine {
-		name := hrefs[ref.IDRef]
-		switch {
-		case name == "":
-			return "", fmt.Errorf("%s: the spine names %q, which the manifest does not list", opf, ref.IDRef)
-		case nav[ref.IDRef]:
-			continue
+	page := func(idref string) (string, error) {
+		name := hrefs[idref]
+		if name == "" {
+			return "", fmt.Errorf("%s: the spine names %q, which the manifest does not list", opf, idref)
 		}
 		rc, err := open(name)
 		if err != nil {
 			return "", err
 		}
-		page, err := io.ReadAll(rc)
+		body, err := io.ReadAll(rc)
 		rc.Close()
 		switch {
 		case overCap(err):
@@ -427,10 +426,38 @@ func epubText(body []byte) (string, error) {
 		case err != nil:
 			return "", fmt.Errorf("%s: %w", name, err)
 		}
-		text, err := htmlText(epubHead.ReplaceAll(page, nil))
+		text, err := htmlText(epubHead.ReplaceAll(body, nil))
 		if err != nil {
 			return "", fmt.Errorf("%s: %w", name, err)
 		}
+		return text, nil
+	}
+
+	// A page that cannot be read — one the spine names and the manifest
+	// does not list, one the manifest lists and the zip does not hold — is
+	// one page lost, not the book: it is passed over, and the book refused
+	// only when no page of it could be read.
+	var (
+		pages  []string
+		size   int
+		read   int
+		missed error // the first page that could not be read
+	)
+	for _, ref := range pkg.Spine {
+		if nav[ref.IDRef] {
+			continue
+		}
+		text, err := page(ref.IDRef)
+		switch {
+		case overCap(err):
+			return "", err
+		case err != nil:
+			if missed == nil {
+				missed = err
+			}
+			continue
+		}
+		read++
 		if text == "" {
 			continue
 		}
@@ -438,6 +465,9 @@ func epubText(body []byte) (string, error) {
 			return "", errTextCap
 		}
 		pages = append(pages, text)
+	}
+	if read == 0 && missed != nil {
+		return "", missed
 	}
 	return strings.Join(pages, "\n\n"), nil
 }
