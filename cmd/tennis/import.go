@@ -16,6 +16,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/satoricorp/tennis"
@@ -154,7 +155,7 @@ func registerImportFlags(fs_ *flag.FlagSet, o *importOpts) {
 	fs_.BoolVar(&o.asJSON, "json", false, "machine-readable output")
 	fs_.StringVar(&o.format, "format", formatAuto, "auto | chatgpt | claude | claude-code | codex | files")
 	fs_.StringVar(&o.per, "per", perTurn, "one document per turn | conversation")
-	fs_.StringVar(&o.ext, "ext", ".md,.txt", "extensions to index when the source is only files")
+	fs_.StringVar(&o.ext, "ext", defaultExt, "only these extensions, comma-separated (default: everything tennis can read)")
 	fs_.StringVar(&o.model, "model", "", "built-in model for a new namespace (default "+embed.DefaultModel+")")
 	fs_.StringVar(&o.openaiModel, "openai", "", "use an OpenAI model instead of the built-in one (requires OPENAI_API_KEY)")
 	fs_.IntVar(&o.chunkSize, "chunk", 0, "chunk size in characters for a new namespace")
@@ -222,9 +223,10 @@ func runImport(nsName string, paths []string, o importOpts) error {
 	warn := func(msg string) { fmt.Fprintln(os.Stderr, "tennis: import:", msg) }
 
 	var (
-		reports []map[string]any
-		failed  int
-		pathErr error
+		reports      []map[string]any
+		failed       int
+		skippedFiles int
+		pathErr      error
 	)
 	for _, p := range paths {
 		rep, err := importPath(p, *format, granularity, *ext, sink, warn, *asJSON)
@@ -242,6 +244,9 @@ func runImport(nsName string, paths []string, o importOpts) error {
 			break
 		}
 		failed += rep["failed"].(int)
+		if n, ok := rep["skipped_files"].(int); ok {
+			skippedFiles += n
+		}
 		reports = append(reports, rep)
 	}
 	if err := sink.flush(); err != nil {
@@ -262,7 +267,7 @@ func runImport(nsName string, paths []string, o importOpts) error {
 		out := map[string]any{
 			"sources": reports,
 			"written": sink.res.Written, "skipped": sink.res.Skipped,
-			"chunks": sink.res.Chunks, "failed": failed,
+			"chunks": sink.res.Chunks, "failed": failed, "skipped_files": skippedFiles,
 		}
 		if sink.cards != nil {
 			out["cards"] = sink.cards.written
@@ -281,6 +286,9 @@ func runImport(nsName string, paths []string, o importOpts) error {
 			sink.res.Written, sink.res.Skipped, sink.res.Chunks, nsName)
 		if sink.cards != nil && sink.cards.written > 0 {
 			fmt.Printf(", %d cards in %s", sink.cards.written, sink.cards.dir)
+		}
+		if skippedFiles > 0 {
+			fmt.Printf(" (%d files skipped)", skippedFiles)
 		}
 		if failed > 0 {
 			fmt.Printf(" (%d failed)", failed)
@@ -394,7 +402,7 @@ func importPath(p, format, per, ext string, sink *docSink, warn func(string), qu
 		// Silence here would look like success. It never is: either the archive
 		// is not what it looked like, or the filter excluded everything in it.
 		if pl.format == formatFiles {
-			return nil, fmt.Errorf("no indexable files in %s (looking for %s, %d skipped)", a.display, ext, skippedFiles)
+			return nil, fmt.Errorf("no indexable files in %s (looking for %s, %d skipped)", a.display, lookingFor(ext), skippedFiles)
 		}
 		return nil, fmt.Errorf("nothing to import from %s (read as %s)", a.display, pl.format)
 	}
@@ -710,66 +718,104 @@ const maxDetectSniffs = 50
 
 // --- the plain-files fallback ----------------------------------------------
 
-// importFiles is what an archive that is not a chat export gets: the same
-// treatment seed gives a directory, applied to entries inside the zip. It
-// returns how many files it refused, which is reported but never fatal —
-// declining to index a PDF is the tool working, here as in seed.
+// importFiles is what an archive that is not a chat export gets: every file
+// in it that holds text, read by whatever reads its kind (see readers.go),
+// indexed, and given a card the way every conversation gets one. It returns
+// how many files it passed over, which is reported but never fatal —
+// declining to index a photo is the tool working.
+//
+// Reading runs on a few workers because the readers that call out to the
+// system take a few hundred milliseconds a file, and a folder of PDFs read
+// one at a time would be minutes of silence.
 func importFiles(a *archive, ext string, sink *docSink, warn func(string)) (int, error) {
-	wanted := map[string]bool{}
-	for _, e := range strings.Split(ext, ",") {
-		if e = strings.TrimSpace(e); e != "" {
-			wanted[e] = true
+	wanted := extSet(ext)
+	var todo []archiveEntry
+	for _, e := range a.entries {
+		if hidden(e.path) || (len(wanted) > 0 && !wanted[strings.ToLower(path.Ext(e.path))]) {
+			continue
 		}
+		todo = append(todo, e)
 	}
 
+	type result struct {
+		e    archiveEntry
+		text string
+		err  error
+	}
+	jobs := make(chan archiveEntry)
+	results := make(chan result)
+	var wg sync.WaitGroup
+	for i := 0; i < readConcurrency; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for e := range jobs {
+				text, err := fileText(a.file(e))
+				results <- result{e, text, err}
+			}
+		}()
+	}
+	go func() {
+		for _, e := range todo {
+			jobs <- e
+		}
+		close(jobs)
+		wg.Wait()
+		close(results)
+	}()
+
 	skipped := 0
-	for _, e := range a.entries {
-		if len(wanted) > 0 && !wanted[path.Ext(e.path)] {
-			continue
-		}
-		if e.size > maxSeedFileSize {
+	for r := range results {
+		if r.err != nil {
 			skipped++
-			warn(fmt.Sprintf("skipping %s (%.1fMB is over the %dMB cap)", e.path, float64(e.size)/(1<<20), maxSeedFileSize/(1<<20)))
+			if !errors.Is(r.err, errNotText) {
+				warn(fmt.Sprintf("skipping %s (%v)", r.e.path, r.err))
+			}
 			continue
 		}
-		f, err := a.open(e.path)
-		if err != nil {
-			skipped++
-			warn(err.Error())
-			continue
-		}
-		// The size checked above came from the zip's own header, which is a
-		// claim, not a measurement. Reading one byte past the cap is what
-		// catches an entry whose header understates it.
-		body, err := io.ReadAll(io.LimitReader(f, maxSeedFileSize+1))
-		f.Close()
-		if err != nil {
-			skipped++
-			warn(fmt.Sprintf("skipping %s (%v)", e.path, err))
-			continue
-		}
-		if int64(len(body)) > maxSeedFileSize {
-			skipped++
-			warn(fmt.Sprintf("skipping %s (larger than the %dMB cap, whatever its header says)", e.path, maxSeedFileSize/(1<<20)))
-			continue
-		}
-		if isBinary(body) {
-			skipped++
-			warn(fmt.Sprintf("skipping %s (binary content)", e.path))
-			continue
-		}
-		id := a.docID(e.path)
+		id := a.docID(r.e.path)
 		attrs := map[string]any{
-			"kind": "file", "path": id, "name": path.Base(e.path), "size": e.size,
+			"kind": "file", "path": id, "name": path.Base(r.e.path), "size": r.e.size,
 		}
-		if !e.mod.IsZero() {
-			attrs["modified"] = e.mod.UTC().Format(time.RFC3339)
+		if !r.e.mod.IsZero() {
+			attrs["modified"] = r.e.mod.UTC().Format(time.RFC3339)
 		}
-		if err := sink.add(tennis.Document{ID: id, Text: string(body), Attributes: attrs}); err != nil {
+		sink.cards.add(fileCard(id, path.Base(r.e.path), r.text, r.e.mod, r.e.size))
+		if err := sink.add(tennis.Document{ID: id, Text: r.text, Attributes: attrs}); err != nil {
+			// Let the readers finish what they have in hand rather than leave
+			// them blocked on a channel nobody reads.
+			go func() {
+				for range results {
+				}
+			}()
 			return skipped, err
 		}
 	}
 	return skipped, nil
+}
+
+// readConcurrency is how many files are read at once. The built-in readers
+// are fast and the external ones are a process each; four keeps a laptop
+// responsive either way.
+const readConcurrency = 4
+
+// file presents an entry to the readers. A directory entry has a path on
+// disk; a zip member has only a way to be opened.
+func (a *archive) file(e archiveEntry) fileEntry {
+	f := fileEntry{name: path.Base(e.path), size: e.size, open: func() (io.ReadCloser, error) { return a.open(e.path) }}
+	if !a.isZip {
+		f.path = filepath.Join(a.root, filepath.FromSlash(e.path))
+	}
+	return f
+}
+
+// lookingFor says what the files filter was, for the error that nothing
+// matched it.
+func lookingFor(ext string) string {
+	if strings.TrimSpace(ext) == "" {
+		return "any file with text"
+	}
+	return ext
 }
 
 // --- the sink --------------------------------------------------------------
@@ -792,9 +838,9 @@ type docSink struct {
 	capture  func(id, text string, attrs map[string]any)
 	captured int
 
-	// cards, when set, receives each conversation once — independent of
-	// granularity, since a card describes the conversation rather than the
-	// documents it was split into.
+	// cards, when set, receives each conversation and each indexed file once.
+	// A conversation's card is independent of granularity, since it describes
+	// the conversation rather than the documents it was split into.
 	cards *cardWriter
 }
 
@@ -873,7 +919,7 @@ func (c conversation) emit(per string, sink *docSink) error {
 	if len(c.turns) == 0 {
 		return nil
 	}
-	sink.cards.add(c)
+	sink.cards.add(c.card())
 	if per == perConversation {
 		var b strings.Builder
 		if c.title != "" {

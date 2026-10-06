@@ -121,7 +121,7 @@ tennis add --files ~/Documents/notes
 A `.zip`, an already-unzipped directory, and a single transcript are all acceptable. Other useful flags:
 
 ```bash
-tennis add ./src --files --ext .go,.ts,.rs    # pick extensions (default .md,.txt)
+tennis add ./src --files --ext .go,.ts,.rs    # only these extensions (default: everything with text)
 tennis add ./docs --chunk 2000                # bigger chunks for a new namespace
 tennis add ~/.codex --ns work                 # a namespace other than the default
 tennis add ./docs --json                      # machine-readable
@@ -153,7 +153,11 @@ tennis search "the timeout" --where source=codex
 
 Re-running `add` is an incremental update, and re-adding the same source is free. File documents are keyed by path and skipped when contents and metadata are byte-identical to what is stored — not re-read into the model, not re-indexed — which is why re-adding a large corpus after editing one file takes about as long as indexing one file. Session documents are keyed by the export's own conversation and message IDs, so a fresh export months later writes only what is new.
 
-`add` refuses two kinds of junk when reading plain files, with a note on stderr: files containing binary content (a PDF's raw bytes would index without erroring and quietly pollute every future ranking), and files over 10MB (at that size it's a log or a dataset, not prose). Binary detection is a NUL-byte check in the leading 8KB, the same heuristic git uses; a binary file shorter than that window with no NUL byte in it can slip through and get indexed.
+`add` reads every file in a folder that has text in it. Plain text of any kind — notes, code, JSON, CSV — is indexed as it is. Spreadsheets, Word and PowerPoint files, and HTML are read by tennis itself, with the standard library: a workbook sheet by sheet with one row per line and its dates as dates, a document paragraph by paragraph, a deck slide by slide. PDFs are read with `pdftotext` when it is installed and otherwise, on a Mac, by Spotlight's own importer; RTF, the older Office formats, Pages, Numbers, Keynote, EPUB, and email are read through macOS the same way. On a machine with no reader for a format, the file is skipped with a note saying what to install.
+
+Photos, audio, video, and archives are passed over without comment, as are dotfiles and anything under a dot directory. Anything else that turns out to be binary, and any text file over 10MB (at that size it's a log or a dataset, not prose), is skipped with a note on stderr. Binary detection is a NUL-byte check in the leading 8KB, the same heuristic git uses.
+
+Every conversation and every file also gets a card: a markdown summary in `~/tennis` (`--cards <dir>`, or `$TENNIS_CARDS`), with prose from `ANTHROPIC_API_KEY` or `OPENAI_API_KEY` when one is set and the opening of the thread or file when not. A file's card is named after the file, so re-adding a folder updates its cards in place. Cards are written and never read back, so they are safe to edit, move, or delete; `--no-cards` skips them.
 
 Two things are deliberately left out of session imports. Local transcripts are indexed from their text and thinking, not their tool calls and tool results — those are mostly whole file reads and command output, and letting them in would mean every search ranked file contents above what was said about them. A Codex rollout records each exchange twice, once as raw model traffic carrying the harness preamble and once as the events the interface showed; tennis reads the second, because what you remember saying is what you typed. ChatGPT messages the exporter marked as hidden are skipped for the same reason: they were never on screen.
 
@@ -170,7 +174,7 @@ tennis add --ndjson --ns agents --openai text-embedding-3-small < events.ndjson
 tennis add --ndjson --ns agents --json < events.ndjson # machine-readable
 ```
 
-Each line is `{"id": "...", "text": "...", "attributes": {...}}` — `attributes` is optional, everything else follows the rest of `add`: the namespace is created on first use bound to the builtin model (or `--openai <model>`), and a document whose text and attributes are byte-identical to what's stored is skipped rather than re-embedded. No cards are written, because these documents are not conversations.
+Each line is `{"id": "...", "text": "...", "attributes": {...}}` — `attributes` is optional, everything else follows the rest of `add`: the namespace is created on first use bound to the builtin model (or `--openai <model>`), and a document whose text and attributes are byte-identical to what's stored is skipped rather than re-embedded. No cards are written, because these documents are neither conversations nor files.
 
 A line that isn't valid JSON, or is missing `id` or `text`, is reported to stderr with its line number and does not stop the batch; the command exits nonzero if any line failed.
 

@@ -49,15 +49,15 @@ In hybrid mode, `no matches` means the namespace is empty or your `--where` filt
 tennis ns list
 ```
 
-## "no indexable files in … (looking for .md,.txt, N skipped)"
+## "no indexable files in … (looking for any file with text, N skipped)"
 
-`add` indexes `.md` and `.txt` by default. Name the extensions you want:
+`add` reads every file with text in it by default, so this means the folder held none it could read: photos, archives, or formats with no reader on this machine. With `--ext`, only the named extensions count:
 
 ```bash
 tennis add ./src --files --ext .go,.ts,.rs
 ```
 
-The `N skipped` count includes files refused for content rather than extension: files containing binary content, and files over 10MB. Both are refused with a note on stderr, because a PDF's raw bytes would index without erroring and quietly pollute every future ranking.
+The `N skipped` count is the files passed over: photos, audio, video and archives (quietly), unknown binaries and text over 10MB (with a note on stderr), and formats whose reader is missing on this machine — a PDF with neither `pdftotext` nor macOS, say — which are noted along with what to install.
 
 ## "does not look like a chat export" / "nothing to import from …"
 

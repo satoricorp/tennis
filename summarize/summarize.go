@@ -1,11 +1,11 @@
-// Package summarize turns a conversation transcript into the few sentences that
-// go on its markdown card.
+// Package summarize turns a conversation transcript, or a file, into the few
+// sentences that go on its markdown card.
 //
 // This is the one part of tennis that needs a network and a key. Search does
 // not: ranking runs entirely on the built-in static embedder, so a machine with
 // no key and no connection can still find everything it has already collected.
 // Only writing the human-readable card requires a model, and only once per
-// conversation.
+// conversation or file.
 //
 // Requests are raw HTTP rather than a vendor SDK, matching embed/openai.go. An
 // SDK would be a larger dependency than the entire rest of this program, for a
@@ -68,15 +68,40 @@ Write 2-4 sentences of plain prose covering what the person was trying to do, wh
 
 Write only the summary. No preamble, no heading, no bullet points, no restating the title.`
 
-// Input is a conversation reduced to what a summary needs. It is a plain
-// struct rather than the importer's own type so this package stays independent
-// of how conversations are read — every source ends up here the same shape.
+// fileSystemPrompt is the instruction for a file. "What was decided" is the
+// right question for a transcript and the wrong one for a spreadsheet; a file
+// is described by what it holds and what someone would open it to find.
+const fileSystemPrompt = `You summarize files for a personal archive.
+
+Write 2-4 sentences of plain prose covering what the file is, what it contains, and what someone would open it to find. Be specific: name the actual subjects, columns, figures, names, and dates rather than describing them in the abstract.
+
+Write only the summary. No preamble, no heading, no bullet points, no restating the filename.`
+
+// The kinds of thing a card can describe. An Input with no Kind is a
+// conversation, which is what every caller was before files had cards.
+const (
+	KindConversation = "conversation"
+	KindFile         = "file"
+)
+
+// Input is a conversation — or a file — reduced to what a summary needs. It is
+// a plain struct rather than the importer's own types so this package stays
+// independent of how things are read: every source ends up here the same shape.
 type Input struct {
+	Kind       string // KindConversation (the default when empty) or KindFile
 	Source     string
 	Title      string
 	Project    string
-	Turns      int
-	Transcript string
+	Turns      int    // conversations only
+	Path       string // files only: where it lives, so the model can say so
+	Transcript string // the conversation, or the file's text
+}
+
+func system(in Input) string {
+	if in.Kind == KindFile {
+		return fileSystemPrompt
+	}
+	return systemPrompt
 }
 
 // Summarizer writes the prose for a conversation's card.
@@ -119,15 +144,23 @@ func Fallback(firstUserTurn string) string {
 	return truncateWords(strings.TrimSpace(firstUserTurn), 60)
 }
 
-// prompt assembles the user turn: metadata the transcript does not state, then
-// the transcript itself, elided in the middle if long.
+// prompt assembles the user turn: metadata the text does not state, then the
+// text itself, elided in the middle if long.
 func prompt(in Input) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "Source: %s\n", in.Source)
-	if in.Project != "" {
-		fmt.Fprintf(&b, "Project: %s\n", in.Project)
+	if in.Kind == KindFile {
+		fmt.Fprintf(&b, "File: %s\n", in.Title)
+		if in.Path != "" {
+			fmt.Fprintf(&b, "Path: %s\n", in.Path)
+		}
+		b.WriteString("\n")
+	} else {
+		fmt.Fprintf(&b, "Source: %s\n", in.Source)
+		if in.Project != "" {
+			fmt.Fprintf(&b, "Project: %s\n", in.Project)
+		}
+		fmt.Fprintf(&b, "Turns: %d\n\n", in.Turns)
 	}
-	fmt.Fprintf(&b, "Turns: %d\n\n", in.Turns)
 
 	t := in.Transcript
 	if len(t) > headChars+tailChars {
@@ -262,7 +295,7 @@ func (a *anthropic) Summarize(ctx context.Context, in Input) (string, error) {
 		}, anthropicRequest{
 			Model:        a.model,
 			MaxTokens:    anthropicMaxTokens,
-			System:       systemPrompt,
+			System:       system(in),
 			Messages:     []anthropicMessage{{Role: "user", Content: prompt(in)}},
 			OutputConfig: anthropicOutput{Effort: "low"},
 		})
@@ -345,7 +378,7 @@ func (o *openai) Summarize(ctx context.Context, in Input) (string, error) {
 			Model:  o.model,
 			MaxTok: anthropicMaxTokens,
 			Messages: []openaiChatMsg{
-				{Role: "system", Content: systemPrompt},
+				{Role: "system", Content: system(in)},
 				{Role: "user", Content: prompt(in)},
 			},
 		})

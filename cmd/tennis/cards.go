@@ -2,10 +2,13 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -14,8 +17,8 @@ import (
 	"github.com/satoricorp/tennis/summarize"
 )
 
-// A card is a readable markdown summary of one conversation, written to
-// ~/tennis as it is imported.
+// A card is a readable markdown summary of one conversation or one file,
+// written to ~/tennis as it is imported.
 //
 // tennis writes cards and never reads them back. The documents in SQLite are
 // the record; a card is a rendering of one. That one-way rule is what makes
@@ -43,15 +46,99 @@ func defaultCardDir() string {
 // end, so this stays polite.
 const cardConcurrency = 4
 
-// cardWriter turns conversations into cards in the background while the import
-// keeps reading. Conversations arrive one at a time from the readers; doing the
-// API call inline would serialize hundreds of round trips behind a parser that
-// is already finished.
+// card is one entry in the card directory before it is rendered: the thing
+// being described, reduced to what the filename, the frontmatter, and the
+// summarizer need. A conversation and a file both become one, so the writer,
+// the stale-name sweep, and the no-model fallback are written once.
+type card struct {
+	kind   string         // summarize.KindConversation or summarize.KindFile
+	source string         // chatgpt | claude | claude-code | codex | file
+	id     string         // the conversation id, or the file's document id
+	title  string         // the thread's title or the file's name; may be empty
+	stamp  string         // created (thread) or modified (file), as the source gave it
+	when   time.Time      // the stamp parsed, or the earliest turn; names a thread's card
+	turns  int            // conversations only
+	meta   map[string]any // extra frontmatter: project, cwd, branch, model, size
+
+	text     string // what the summarizer reads
+	fallback string // what the card carries instead when there is no summary
+	pointer  string // the line that says how to get the rest
+}
+
+// card is the conversation as the card writer sees it.
+func (c conversation) card() card {
+	title := c.title
+	if title == "" {
+		title = firstLine(firstUserTurn(c), 80)
+	}
+	when, err := time.Parse(time.RFC3339, c.create)
+	if err != nil {
+		when = earliestTurn(c)
+	}
+	return card{
+		kind: summarize.KindConversation, source: c.source, id: c.id,
+		title: title, stamp: c.create, when: when, turns: len(c.turns), meta: c.extra,
+		text:     c.transcript(),
+		fallback: summarize.Fallback(firstUserTurn(c)),
+		pointer:  fmt.Sprintf("Full conversation: `tennis search --where 'session=%s'`", c.id),
+	}
+}
+
+// fileCard describes an indexed file the way conversation.card describes a
+// thread. Its opening lines stand in for the opening message when there is no
+// model: the start of a document is usually what it is about.
+func fileCard(id, name, text string, modified time.Time, size int64) card {
+	stamp := ""
+	if !modified.IsZero() {
+		stamp = modified.UTC().Format(time.RFC3339)
+	}
+	return card{
+		kind: summarize.KindFile, source: "file", id: id,
+		title: name, stamp: stamp, when: modified, meta: map[string]any{"size": size},
+		text:     text,
+		fallback: excerpt(text),
+		pointer:  fmt.Sprintf("Full text: `tennis search --where 'path=%s'`", id),
+	}
+}
+
+// excerpt is a file's no-model fallback: its first lines as they are, in a
+// code fence so a spreadsheet's rows stay rows on the card. The word budget
+// matches summarize.Fallback; the line cap keeps a sheet of one-word cells
+// from running on.
+func excerpt(text string) string {
+	const maxWords, maxLines, maxLine = 60, 12, 120
+	var lines []string
+	words, more := 0, false
+	for _, line := range strings.Split(strings.TrimSpace(text), "\n") {
+		line = strings.TrimRight(line, " \t\r")
+		if line == "" {
+			continue
+		}
+		if words >= maxWords || len(lines) >= maxLines {
+			more = true
+			break
+		}
+		lines = append(lines, truncate(line, maxLine))
+		words += len(strings.Fields(line))
+	}
+	if len(lines) == 0 {
+		return ""
+	}
+	if more {
+		lines = append(lines, "…")
+	}
+	return "```\n" + strings.Join(lines, "\n") + "\n```"
+}
+
+// cardWriter turns cards into files in the background while the import keeps
+// reading. Conversations and files arrive one at a time from the readers;
+// doing the API call inline would serialize hundreds of round trips behind a
+// parser that is already finished.
 type cardWriter struct {
 	dir string
 	sum summarize.Summarizer
 
-	work chan conversation
+	work chan card
 	wg   sync.WaitGroup
 	ctx  context.Context
 
@@ -67,7 +154,7 @@ type cardWriter struct {
 }
 
 // newCardWriter starts the workers. A nil Summarizer is allowed: cards are
-// still written, carrying the opening message instead of prose.
+// still written, carrying the opening of the thread or file instead of prose.
 func newCardWriter(ctx context.Context, dir string, sum summarize.Summarizer) (*cardWriter, error) {
 	expanded, err := expandHome(dir)
 	if err != nil {
@@ -77,7 +164,7 @@ func newCardWriter(ctx context.Context, dir string, sum summarize.Summarizer) (*
 		return nil, err
 	}
 
-	w := &cardWriter{dir: expanded, sum: sum, ctx: ctx, work: make(chan conversation)}
+	w := &cardWriter{dir: expanded, sum: sum, ctx: ctx, work: make(chan card)}
 	for i := 0; i < cardConcurrency; i++ {
 		w.wg.Add(1)
 		go func() {
@@ -90,8 +177,8 @@ func newCardWriter(ctx context.Context, dir string, sum summarize.Summarizer) (*
 	return w, nil
 }
 
-func (w *cardWriter) add(c conversation) {
-	if w == nil || len(c.turns) == 0 {
+func (w *cardWriter) add(c card) {
+	if w == nil {
 		return
 	}
 	w.work <- c
@@ -115,16 +202,21 @@ func (w *cardWriter) close() {
 // hundreds of calls, and a refusal, timeout, or rate limit at number 300 must
 // not discard the 299 already written — so every failure degrades to the
 // opening message and is counted.
-func (w *cardWriter) one(c conversation) {
-	text := summarize.Fallback(firstUserTurn(c))
+func (w *cardWriter) one(c card) {
+	text := c.fallback
 	if w.sum != nil {
-		got, err := w.sum.Summarize(w.ctx, summarize.Input{
+		in := summarize.Input{
+			Kind:       c.kind,
 			Source:     c.source,
 			Title:      c.title,
-			Project:    attrText(c.extra, "project", "cwd"),
-			Turns:      len(c.turns),
-			Transcript: c.transcript(),
-		})
+			Project:    attrText(c.meta, "project", "cwd"),
+			Turns:      c.turns,
+			Transcript: c.text,
+		}
+		if c.kind == summarize.KindFile {
+			in.Path = c.id
+		}
+		got, err := w.sum.Summarize(w.ctx, in)
 		switch {
 		case err == nil && strings.TrimSpace(got) != "":
 			text = got
@@ -188,8 +280,8 @@ func attrText(m map[string]any, keys ...string) string {
 	return ""
 }
 
-// writeCard writes or replaces the card for a conversation.
-func writeCard(dir string, c conversation, summary string) error {
+// writeCard writes or replaces the card.
+func writeCard(dir string, c card, summary string) error {
 	stem, prefix := cardStem(c)
 	path := filepath.Join(dir, stem+".md")
 
@@ -197,10 +289,12 @@ func writeCard(dir string, c conversation, summary string) error {
 	// — and therefore slug — has since changed. Claude Code names a session
 	// several turns in, so importing twice can produce two different names for
 	// one conversation. The timestamp-and-source prefix is stable.
-	if stale, _ := filepath.Glob(filepath.Join(dir, prefix+"*.md")); len(stale) > 0 {
-		for _, s := range stale {
-			if s != path {
-				os.Remove(s)
+	if prefix != "" {
+		if stale, _ := filepath.Glob(filepath.Join(dir, prefix+"*.md")); len(stale) > 0 {
+			for _, s := range stale {
+				if s != path {
+					os.Remove(s)
+				}
 			}
 		}
 	}
@@ -210,25 +304,37 @@ func writeCard(dir string, c conversation, summary string) error {
 // cardStem is the filename without extension, plus the stable prefix used to
 // find earlier names for the same conversation. The volatile part — the title
 // slug — has to come last for that sweep to work.
-func cardStem(c conversation) (stem, prefix string) {
-	ts := time.Now()
-	if t, err := time.Parse(time.RFC3339, c.create); err == nil {
-		ts = t
-	} else if t := earliestTurn(c); !t.IsZero() {
-		ts = t
+//
+// A file's card is named by the file, not by when it was touched: the same
+// path has to land on the same card after every edit, and the hash keeps two
+// notes.md in different folders apart. Nothing in the name is volatile, so
+// there is no prefix to sweep.
+func cardStem(c card) (stem, prefix string) {
+	if c.kind == summarize.KindFile {
+		name := slug(c.title, 60)
+		if name == "" {
+			name = "file"
+		}
+		return name + "-" + shortHash(c.id), ""
+	}
+
+	ts := c.when
+	if ts.IsZero() {
+		ts = time.Now()
 	}
 	prefix = ts.UTC().Format("2006-01-02-150405") + "-" + slug(c.source, 20) + "-"
-
-	title := c.title
-	if title == "" {
-		title = firstLine(firstUserTurn(c), 80)
-	}
-	if s := slug(title, 60); s != "" {
+	if s := slug(c.title, 60); s != "" {
 		return prefix + s, prefix
 	}
 	// A title that slugs to nothing — non-Latin, or all punctuation — falls
 	// back to the conversation id so the file is still identifiable on disk.
 	return prefix + slug(c.id, 24), prefix
+}
+
+// shortHash is enough of a digest to tell two paths apart in a filename.
+func shortHash(s string) string {
+	sum := sha256.Sum256([]byte(s))
+	return hex.EncodeToString(sum[:4])
 }
 
 func earliestTurn(c conversation) time.Time {
@@ -245,30 +351,38 @@ func earliestTurn(c conversation) time.Time {
 	return out
 }
 
-// renderCard builds the markdown. The document ID prefix is in the frontmatter
-// and the retrieval command is in the body, because the card's whole job is to
-// be readable on its own and to say how to get the rest.
-func renderCard(c conversation, summary string) string {
+// renderCard builds the markdown. The document ID is in the frontmatter and
+// the retrieval command is in the body, because the card's whole job is to be
+// readable on its own and to say how to get the rest.
+func renderCard(c card, summary string) string {
 	title := c.title
-	if title == "" {
-		title = firstLine(firstUserTurn(c), 80)
-	}
 	if title == "" {
 		title = "untitled"
 	}
+	isFile := c.kind == summarize.KindFile
 
 	var b strings.Builder
 	b.WriteString("---\n")
-	fmt.Fprintf(&b, "session: %s\n", yamlString(c.source+":"+c.id))
+	if isFile {
+		fmt.Fprintf(&b, "file: %s\n", yamlString(c.id))
+	} else {
+		fmt.Fprintf(&b, "session: %s\n", yamlString(c.source+":"+c.id))
+	}
 	fmt.Fprintf(&b, "source: %s\n", c.source)
 	fmt.Fprintf(&b, "title: %s\n", yamlString(title))
-	if c.create != "" {
-		fmt.Fprintf(&b, "created: %s\n", c.create)
+	switch {
+	case c.stamp == "":
+	case isFile:
+		fmt.Fprintf(&b, "modified: %s\n", c.stamp)
+	default:
+		fmt.Fprintf(&b, "created: %s\n", c.stamp)
 	}
-	fmt.Fprintf(&b, "turns: %d\n", len(c.turns))
-	for _, k := range []string{"project", "cwd", "branch", "model"} {
-		if v := attrText(c.extra, k); v != "" {
-			fmt.Fprintf(&b, "%s: %s\n", k, yamlString(v))
+	if !isFile {
+		fmt.Fprintf(&b, "turns: %d\n", c.turns)
+	}
+	for _, k := range []string{"project", "cwd", "branch", "model", "size"} {
+		if v := yamlScalar(c.meta[k]); v != "" {
+			fmt.Fprintf(&b, "%s: %s\n", k, v)
 		}
 	}
 	b.WriteString("---\n\n")
@@ -278,8 +392,29 @@ func renderCard(c conversation, summary string) string {
 		b.WriteString(s)
 		b.WriteString("\n\n")
 	}
-	fmt.Fprintf(&b, "Full conversation: `tennis search --where 'session=%s'`\n", c.id)
+	b.WriteString(c.pointer)
+	b.WriteString("\n")
 	return b.String()
+}
+
+// yamlScalar renders a frontmatter value, or nothing for one that is absent or
+// empty. Strings are quoted when they need to be; a number stays a number.
+func yamlScalar(v any) string {
+	switch v := v.(type) {
+	case nil:
+		return ""
+	case string:
+		if v == "" {
+			return ""
+		}
+		return yamlString(v)
+	case int:
+		return strconv.Itoa(v)
+	case int64:
+		return strconv.FormatInt(v, 10)
+	default:
+		return yamlString(fmt.Sprint(v))
+	}
 }
 
 // yamlString quotes a scalar when it would otherwise be misparsed. Titles are

@@ -176,15 +176,27 @@ func withStdin(t *testing.T, data string) {
 // concurrent drain is needed before fn returns.
 func captureStdout(t *testing.T, fn func() error) (string, error) {
 	t.Helper()
-	old := os.Stdout
+	return captureStream(t, &os.Stdout, fn)
+}
+
+// captureStderr is the same for the other stream, for tests about what a
+// command says along the way rather than what it produces.
+func captureStderr(t *testing.T, fn func() error) (string, error) {
+	t.Helper()
+	return captureStream(t, &os.Stderr, fn)
+}
+
+func captureStream(t *testing.T, stream **os.File, fn func() error) (string, error) {
+	t.Helper()
+	old := *stream
 	r, w, err := os.Pipe()
 	if err != nil {
 		t.Fatal(err)
 	}
-	os.Stdout = w
+	*stream = w
 	runErr := fn()
 	w.Close()
-	os.Stdout = old
+	*stream = old
 
 	var buf bytes.Buffer
 	if _, err := io.Copy(&buf, r); err != nil {

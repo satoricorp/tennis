@@ -35,8 +35,10 @@ tennis add --files ~/Documents/notes
 
 A `.zip`, an already-unzipped directory, and a single transcript are all acceptable. [Importing sessions](/importing) covers what Tennis reads out of each format and what it deliberately skips.
 
+Plain files are read by whatever reads their kind: text of any sort as it is; spreadsheets, Word, PowerPoint and HTML by tennis itself; PDFs with `pdftotext` when it is installed or, on a Mac, by Spotlight; RTF, Pages, Numbers, Keynote and the older Office formats through macOS. Photos, audio, video, archives and dotfiles are passed over. Every file and every conversation also gets a card, a markdown summary written to `~/tennis` and never read back.
+
 ```bash
-tennis add ./src --files --ext .go,.ts,.rs    # pick extensions (default .md,.txt)
+tennis add ./src --files --ext .go,.ts,.rs    # only these extensions (default: everything with text)
 tennis add ./docs --chunk 2000                # bigger chunks for a new namespace
 tennis add ~/.codex --ns work                 # a namespace other than the default
 tennis add ./docs --json                      # machine-readable
@@ -48,7 +50,9 @@ tennis add ./docs --json                      # machine-readable
 | `--format <fmt>` | `auto` (default), `chatgpt`, `claude`, `claude-code`, `codex`, `files` |
 | `--chatgpt` / `--claude` / `--claude-code` / `--codex` / `--files` | shorthand for `--format` |
 | `--per <unit>` | one document per `turn` (default) or `conversation` |
-| `--ext <list>` | extensions to index when the source is plain files (default `.md,.txt`) |
+| `--ext <list>` | only these extensions, when the source is plain files (default: everything with text in it) |
+| `--cards <dir>` | where summary cards are written (default `~/tennis`, or `$TENNIS_CARDS`) |
+| `--no-cards` | skip the summary cards |
 | `--chunk <n>` | chunk size in characters, for a new namespace |
 | `--model <name>` | built-in model for a new namespace (default `potion-retrieval-32M`) |
 | `--openai <model>` | use an OpenAI model instead (requires `OPENAI_API_KEY`) |
@@ -126,7 +130,7 @@ tennis add --ndjson --ns agents --openai text-embedding-3-small < events.ndjson
 tennis add --ndjson --ns agents --json < events.ndjson
 ```
 
-Each line is `{"id": "...", "text": "...", "attributes": {...}}`. `attributes` is optional; everything else follows the rest of `add`, including creating the namespace on first use and skipping documents that are byte-identical to what is stored. Cards are not written for these documents — they are not conversations, so there is nothing to summarize.
+Each line is `{"id": "...", "text": "...", "attributes": {...}}`. `attributes` is optional; everything else follows the rest of `add`, including creating the namespace on first use and skipping documents that are byte-identical to what is stored. Cards are not written for these documents — they are neither conversations nor files.
 
 A line that isn't valid JSON, or is missing `id` or `text`, is reported to stderr with its line number and does not stop the batch. The command exits nonzero if any line failed:
 

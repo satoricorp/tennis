@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -129,7 +130,7 @@ func collectWarn(t *testing.T, path, format, per string, warn func(string)) []do
 	sink.capture = func(id, text string, attrs map[string]any) {
 		recs = append(recs, docRecord{ID: id, Text: text, Attrs: attrs})
 	}
-	if _, err := importPath(path, format, per, ".md,.txt", sink, warn, true); err != nil {
+	if _, err := importPath(path, format, per, defaultExt, sink, warn, true); err != nil {
 		t.Fatalf("importPath(%s, %s): %v", path, format, err)
 	}
 	return recs
@@ -456,23 +457,45 @@ func TestImportPerConversation(t *testing.T) {
 	}
 }
 
-// The fallback: a zip that is not an export at all is still worth indexing,
-// under the same rules seed applies to a directory.
+// The fallback: a zip that is not an export at all is still worth indexing —
+// every file in it with text, read by whatever reads its kind, and nothing
+// said about the photos. A hidden file is not what anyone meant.
 func TestImportPlainZipOfFiles(t *testing.T) {
 	path := writeZip(t, "notes.zip", map[string]string{
-		"notes/auth.md":  "# Session handling\nkeep the user signed in",
-		"notes/logo.png": "\x00\x01binary",
-		"notes/skip.go":  "package main",
+		"notes/auth.md":     "# Session handling\nkeep the user signed in",
+		"notes/budget.xlsx": string(testWorkbook(t)),
+		"notes/memo.docx":   string(testDocx(t, `<w:p><w:r><w:t>Rent is due on the 1st</w:t></w:r></w:p>`)),
+		"notes/page.html":   "<html><body><p>Hotel &amp; taxi</p></body></html>",
+		"notes/script.go":   "package main",
+		"notes/logo.png":    "\x89PNG\x00\x01",
+		"notes/blob.bin":    "\x00\x01\x02",
+		"notes/.secret.md":  "not for the index",
+		"notes/.cache/x.md": "nor this",
 	})
-	recs := collect(t, path, formatAuto, perTurn)
-	if len(recs) != 1 {
-		t.Fatalf("got %d documents, want 1 (.png is binary, .go is not in --ext): %+v", len(recs), recs)
+	var warnings []string
+	recs := collectWarn(t, path, formatAuto, perTurn, func(msg string) { warnings = append(warnings, msg) })
+	got := map[string]string{}
+	for _, r := range recs {
+		got[strings.TrimPrefix(r.ID, path+"!notes/")] = r.Text
 	}
-	if want := path + "!notes/auth.md"; recs[0].ID != want {
-		t.Errorf("id: %q, want %q", recs[0].ID, want)
+	for name, want := range map[string]string{
+		"auth.md": "keep the user signed in", "budget.xlsx": "Rent (monthly)", "memo.docx": "Rent is due on the 1st",
+		"page.html": "Hotel & taxi", "script.go": "package main",
+	} {
+		if !strings.Contains(got[name], want) {
+			t.Errorf("%s: indexed as %q, want it to carry %q", name, got[name], want)
+		}
 	}
-	if got := recs[0].attr("name"); got != "auth.md" {
-		t.Errorf("name attribute: %q", got)
+	for _, name := range []string{"logo.png", "blob.bin", ".secret.md", ".cache/x.md"} {
+		if _, ok := got[name]; ok {
+			t.Errorf("%s should not have been indexed", name)
+		}
+	}
+	if len(warnings) != 1 || !strings.Contains(warnings[0], "blob.bin") {
+		t.Errorf("want exactly one warning, about the unknown binary; got %v", warnings)
+	}
+	if len(recs) == 0 || recs[0].attr("name") == "" || recs[0].attr("path") == "" {
+		t.Errorf("file attributes missing: %+v", recs)
 	}
 }
 
@@ -676,6 +699,142 @@ func TestAddAndSearchDefaultNamespace(t *testing.T) {
 	}
 }
 
+// Files get cards too. An add of a folder holding a note, a spreadsheet, a
+// Word file and — where this machine can read one — a PDF leaves one card per
+// file, named after the file so a re-add lands on the same card, and with no
+// model each card opens with the start of the file. The summarizer note is
+// printed, because it applies.
+func TestAddFilesWritesCards(t *testing.T) {
+	cache := ndjsonTestCache(t)
+	t.Setenv("TENNIS_CACHE", cache)
+	t.Setenv("TENNIS_NS", "")
+	// No key, so the note is the deterministic one and no card reaches an API.
+	t.Setenv("ANTHROPIC_API_KEY", "")
+	t.Setenv("OPENAI_API_KEY", "")
+	cardDir := filepath.Join(t.TempDir(), "cards")
+	t.Setenv("TENNIS_CARDS", cardDir)
+	dbPath := filepath.Join(t.TempDir(), "add.sqlite")
+
+	notes := t.TempDir()
+	files := map[string][]byte{
+		"auth.md":     []byte("# Session handling\nkeep the user signed in"),
+		"budget.xlsx": testWorkbook(t),
+		"memo.docx":   testDocx(t, `<w:p><w:r><w:t>Rent is due on the 1st</w:t></w:r></w:p>`),
+		"photo.jpg":   []byte("\xff\xd8\xff"),
+	}
+	pdf := tool("pdftotext") != "" || runtime.GOOS == "darwin"
+	if pdf {
+		files["plan.pdf"] = testPDF(t)
+	}
+	for name, body := range files {
+		if err := os.WriteFile(filepath.Join(notes, name), body, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	wantCards := len(files) - 1 // the photo gets none
+
+	// Not --json: that mode is quiet about the summarizer, and what the
+	// human-facing run says is part of what is under test.
+	add := func(args ...string) string {
+		t.Helper()
+		stderr, err := captureStderr(t, func() error {
+			_, err := captureStdout(t, func() error {
+				return cmdAdd(append([]string{"--db", dbPath}, args...))
+			})
+			return err
+		})
+		if err != nil {
+			t.Fatalf("add %v: %v\nstderr: %s", args, err, stderr)
+		}
+		return stderr
+	}
+	cardNames := func() []string {
+		t.Helper()
+		entries, err := os.ReadDir(cardDir)
+		if err != nil {
+			t.Fatalf("card directory: %v", err)
+		}
+		var names []string
+		for _, e := range entries {
+			names = append(names, e.Name())
+		}
+		return names
+	}
+	cardFor := func(stem string) string {
+		t.Helper()
+		for _, n := range cardNames() {
+			if strings.HasPrefix(n, stem) {
+				body, err := os.ReadFile(filepath.Join(cardDir, n))
+				if err != nil {
+					t.Fatal(err)
+				}
+				return string(body)
+			}
+		}
+		t.Fatalf("no card named %s*: %v", stem, cardNames())
+		return ""
+	}
+
+	stderr := add("--files", notes)
+	if !strings.Contains(stderr, "no ANTHROPIC_API_KEY or OPENAI_API_KEY") {
+		t.Errorf("files have cards, so an add with no key should say so:\n%s", stderr)
+	}
+	if strings.Contains(stderr, "photo.jpg") {
+		t.Errorf("a photo should be passed over without comment:\n%s", stderr)
+	}
+	if names := cardNames(); len(names) != wantCards {
+		t.Fatalf("%d files left %d cards: %v", wantCards, len(names), names)
+	}
+	for stem, want := range map[string]string{
+		"budget-xlsx-": "Rent (monthly)", "memo-docx-": "Rent is due on the 1st", "auth-md-": "keep the user signed in",
+	} {
+		if body := cardFor(stem); !strings.Contains(body, "source: file") || !strings.Contains(body, want) {
+			t.Errorf("card %s* is missing %q:\n%s", stem, want, body)
+		}
+	}
+	if pdf {
+		if body := cardFor("plan-pdf-"); !strings.Contains(body, "Hotel Esencia in Tulum") {
+			t.Errorf("the PDF's card does not carry its text:\n%s", body)
+		}
+	}
+
+	// The cells are searchable, with the attributes a caller needs to get
+	// back to the file.
+	out, err := captureStdout(t, func() error {
+		return cmdSearch([]string{"--db", dbPath, "--json", "monthly rent"})
+	})
+	if err != nil {
+		t.Fatalf("search: %v\noutput: %s", err, out)
+	}
+	var results []map[string]any
+	if err := json.Unmarshal([]byte(out), &results); err != nil {
+		t.Fatalf("search --json did not parse: %v\noutput: %s", err, out)
+	}
+	var found bool
+	for _, r := range results {
+		if attrs, _ := r["attributes"].(map[string]any); attrs["name"] == "budget.xlsx" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("the spreadsheet was not among the hits: %v", results)
+	}
+
+	// A re-add lands on the same cards rather than growing the folder, and
+	// --no-cards still leaves it alone.
+	add("--files", notes)
+	if names := cardNames(); len(names) != wantCards {
+		t.Errorf("re-adding the folder changed the cards: %v", names)
+	}
+	stderr = add("--no-cards", "--files", notes)
+	if strings.Contains(stderr, "API_KEY") {
+		t.Errorf("--no-cards still talked about the summarizer:\n%s", stderr)
+	}
+	if names := cardNames(); len(names) != wantCards {
+		t.Errorf("--no-cards changed the cards: %v", names)
+	}
+}
+
 // Two source flags is a question with no right answer, and picking one would
 // import the archive as the wrong thing. It has to fail before the namespace
 // is created, or a typo leaves an empty namespace bound to an embedder.
@@ -803,9 +962,10 @@ func TestAddKeepsEarlierPathsWhenALaterOneFails(t *testing.T) {
 
 	good := writeZip(t, "claude-export.zip", map[string]string{"conversations.json": claudeExport})
 	// Nothing in here is indexable: detection falls through to plain files,
-	// and a plain-files import that finds none is an error.
+	// a photo has no text to index, and a plain-files import that finds
+	// nothing is an error.
 	bad := t.TempDir()
-	if err := os.WriteFile(filepath.Join(bad, "readme.rst"), []byte("nothing indexable here"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(bad, "photo.png"), []byte("\x89PNG\x00\x01"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -868,7 +1028,7 @@ func TestAddBadOnlyPathPrintsNoReport(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "add.sqlite")
 
 	bad := t.TempDir()
-	if err := os.WriteFile(filepath.Join(bad, "readme.rst"), []byte("nothing indexable here"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(bad, "photo.png"), []byte("\x89PNG\x00\x01"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	out, err := captureStdout(t, func() error {

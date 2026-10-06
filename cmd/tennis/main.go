@@ -284,7 +284,7 @@ func cmdSeed(args []string) error {
 	fs_ := flag.NewFlagSet("seed", flag.ExitOnError)
 	dbPath := fs_.String("db", defaultDB(), "database file")
 	asJSON := fs_.Bool("json", false, "machine-readable output")
-	ext := fs_.String("ext", ".md,.txt", "comma-separated file extensions to index")
+	ext := fs_.String("ext", defaultExt, "only these extensions, comma-separated (default: everything tennis can read)")
 	model := fs_.String("model", "", "built-in model for a new namespace (default "+embed.DefaultModel+")")
 	openaiModel := fs_.String("openai", "", "use an OpenAI model instead of the built-in one (requires OPENAI_API_KEY)")
 	chunkSize := fs_.Int("chunk", 0, "chunk size in characters for a new namespace")
@@ -324,12 +324,7 @@ func cmdSeed(args []string) error {
 		return err
 	}
 
-	wanted := map[string]bool{}
-	for _, e := range strings.Split(*ext, ",") {
-		if e = strings.TrimSpace(e); e != "" {
-			wanted[e] = true
-		}
-	}
+	wanted := extSet(*ext)
 
 	var docs []tennis.Document
 	skippedFiles := 0
@@ -341,28 +336,37 @@ func cmdSeed(args []string) error {
 	}
 	for _, root := range paths {
 		err := filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
-			if err != nil || d.IsDir() {
+			if err != nil {
 				return err
 			}
-			if len(wanted) > 0 && !wanted[filepath.Ext(p)] {
+			// Hidden entries are skipped below the root, not at it: the
+			// folder a person names is the folder they mean.
+			if rel, _ := filepath.Rel(root, p); rel != "." && hidden(filepath.ToSlash(rel)) {
+				if d.IsDir() {
+					return fs.SkipDir
+				}
+				return nil
+			}
+			if d.IsDir() {
+				return nil
+			}
+			if len(wanted) > 0 && !wanted[strings.ToLower(filepath.Ext(p))] {
 				return nil
 			}
 			info, err := d.Info()
 			if err != nil {
 				return err
 			}
-			// The size cap runs before the read, so a stray multi-GB log
-			// costs a stat rather than a slurp.
-			if info.Size() > maxSeedFileSize {
-				skip(p, fmt.Sprintf("%.1fMB is over the %dMB cap", float64(info.Size())/(1<<20), maxSeedFileSize/(1<<20)))
-				return nil
-			}
-			body, err := os.ReadFile(p)
+			text, err := fileText(fileEntry{
+				name: d.Name(), path: p, size: info.Size(),
+				open: func() (io.ReadCloser, error) { return os.Open(p) },
+			})
 			if err != nil {
-				return err
-			}
-			if isBinary(body) {
-				skip(p, "binary content")
+				if errors.Is(err, errNotText) {
+					skippedFiles++
+				} else {
+					skip(p, err.Error())
+				}
 				return nil
 			}
 			abs, err := filepath.Abs(p)
@@ -374,7 +378,7 @@ func cmdSeed(args []string) error {
 				"modified": info.ModTime().UTC().Format(time.RFC3339),
 				"size":     info.Size(),
 			}
-			docs = append(docs, tennis.Document{ID: abs, Text: string(body), Attributes: attrs})
+			docs = append(docs, tennis.Document{ID: abs, Text: text, Attributes: attrs})
 			return nil
 		})
 		if err != nil {
@@ -382,7 +386,7 @@ func cmdSeed(args []string) error {
 		}
 	}
 	if len(docs) == 0 {
-		return fmt.Errorf("no indexable files under %s (looking for %s, %d skipped)", strings.Join(paths, ", "), *ext, skippedFiles)
+		return fmt.Errorf("no indexable files under %s (looking for %s, %d skipped)", strings.Join(paths, ", "), lookingFor(*ext), skippedFiles)
 	}
 
 	res, err := ns.Write(ctx, docs)
@@ -404,6 +408,12 @@ func cmdSeed(args []string) error {
 // prose someone wants ranked — they are logs, dumps, and datasets — and one of
 // them would dominate both embedding time and the index.
 const maxSeedFileSize = 10 << 20
+
+// defaultExt is what add and seed index when no --ext is given: nothing is
+// filtered by name, and every file with text in it — plain text of any kind,
+// spreadsheets, Word and PowerPoint files, PDFs, whatever else the system can
+// read — is indexed. readers.go says what that covers.
+const defaultExt = ""
 
 // isBinary reports whether content looks like something other than text, using
 // the same heuristic git uses: a NUL byte in the leading window. Indexing a

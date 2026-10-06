@@ -65,7 +65,7 @@ tennis: /Users/you/Documents/notes: reading plain files
 imported 3, skipped 0 unchanged, 3 chunks in "context"
 ```
 
-You never named a namespace, so `add` used `context`, the default, and created it on first use. By default it reads `.md` and `.txt`; pass `--ext` for anything else.
+You never named a namespace, so `add` used `context`, the default, and created it on first use. By default it reads every file with text in it — notes, spreadsheets, Word files, PDFs; pass `--ext` to narrow it to some extensions.
 
 ## Search it
 
@@ -150,8 +150,10 @@ tennis add --files ~/Documents/notes
 
 A `.zip`, an already-unzipped directory, and a single transcript are all acceptable. [Importing sessions](/importing) covers what Tennis reads out of each format and what it deliberately skips.
 
+Plain files are read by whatever reads their kind: text of any sort as it is; spreadsheets, Word, PowerPoint and HTML by tennis itself; PDFs with `pdftotext` when it is installed or, on a Mac, by Spotlight; RTF, Pages, Numbers, Keynote and the older Office formats through macOS. Photos, audio, video, archives and dotfiles are passed over. Every file and every conversation also gets a card, a markdown summary written to `~/tennis` and never read back.
+
 ```bash
-tennis add ./src --files --ext .go,.ts,.rs    # pick extensions (default .md,.txt)
+tennis add ./src --files --ext .go,.ts,.rs    # only these extensions (default: everything with text)
 tennis add ./docs --chunk 2000                # bigger chunks for a new namespace
 tennis add ~/.codex --ns work                 # a namespace other than the default
 tennis add ./docs --json                      # machine-readable
@@ -163,7 +165,9 @@ tennis add ./docs --json                      # machine-readable
 | `--format <fmt>` | `auto` (default), `chatgpt`, `claude`, `claude-code`, `codex`, `files` |
 | `--chatgpt` / `--claude` / `--claude-code` / `--codex` / `--files` | shorthand for `--format` |
 | `--per <unit>` | one document per `turn` (default) or `conversation` |
-| `--ext <list>` | extensions to index when the source is plain files (default `.md,.txt`) |
+| `--ext <list>` | only these extensions, when the source is plain files (default: everything with text in it) |
+| `--cards <dir>` | where summary cards are written (default `~/tennis`, or `$TENNIS_CARDS`) |
+| `--no-cards` | skip the summary cards |
 | `--chunk <n>` | chunk size in characters, for a new namespace |
 | `--model <name>` | built-in model for a new namespace (default `potion-retrieval-32M`) |
 | `--openai <model>` | use an OpenAI model instead (requires `OPENAI_API_KEY`) |
@@ -241,7 +245,7 @@ tennis add --ndjson --ns agents --openai text-embedding-3-small < events.ndjson
 tennis add --ndjson --ns agents --json < events.ndjson
 ```
 
-Each line is `{"id": "...", "text": "...", "attributes": {...}}`. `attributes` is optional; everything else follows the rest of `add`, including creating the namespace on first use and skipping documents that are byte-identical to what is stored. Cards are not written for these documents — they are not conversations, so there is nothing to summarize.
+Each line is `{"id": "...", "text": "...", "attributes": {...}}`. `attributes` is optional; everything else follows the rest of `add`, including creating the namespace on first use and skipping documents that are byte-identical to what is stored. Cards are not written for these documents — they are neither conversations nor files.
 
 A line that isn't valid JSON, or is missing `id` or `text`, is reported to stderr with its line number and does not stop the batch. The command exits nonzero if any line failed:
 
@@ -882,15 +886,15 @@ In hybrid mode, `no matches` means the namespace is empty or your `--where` filt
 tennis ns list
 ```
 
-## "no indexable files in … (looking for .md,.txt, N skipped)"
+## "no indexable files in … (looking for any file with text, N skipped)"
 
-`add` indexes `.md` and `.txt` by default. Name the extensions you want:
+`add` reads every file with text in it by default, so this means the folder held none it could read: photos, archives, or formats with no reader on this machine. With `--ext`, only the named extensions count:
 
 ```bash
 tennis add ./src --files --ext .go,.ts,.rs
 ```
 
-The `N skipped` count includes files refused for content rather than extension: files containing binary content, and files over 10MB. Both are refused with a note on stderr, because a PDF's raw bytes would index without erroring and quietly pollute every future ranking.
+The `N skipped` count is the files passed over: photos, audio, video and archives (quietly), unknown binaries and text over 10MB (with a note on stderr), and formats whose reader is missing on this machine — a PDF with neither `pdftotext` nor macOS, say — which are noted along with what to install.
 
 ## "does not look like a chat export" / "nothing to import from …"
 

@@ -101,6 +101,28 @@ func TestPromptTruncationIsRuneSafe(t *testing.T) {
 	}
 }
 
+// TestFilePromptDescribesTheFile: a file is not a transcript, and asking the
+// model what was decided in a spreadsheet gets a summary of nothing. A file
+// gets its own instruction and is introduced by name and path, not by turns.
+func TestFilePromptDescribesTheFile(t *testing.T) {
+	file := Input{Kind: KindFile, Title: "budget.xlsx", Path: "/Users/joe/notes/budget.xlsx", Transcript: "## Budget\n\nRent\t1200"}
+	p := prompt(file)
+	for _, want := range []string{"File: budget.xlsx", "Path: /Users/joe/notes/budget.xlsx", "Rent\t1200"} {
+		if !strings.Contains(p, want) {
+			t.Errorf("file prompt is missing %q:\n%s", want, p)
+		}
+	}
+	if strings.Contains(p, "Turns:") || strings.Contains(p, "Source:") {
+		t.Errorf("file prompt carried transcript metadata:\n%s", p)
+	}
+	if system(file) == systemPrompt || !strings.Contains(system(file), "files") {
+		t.Errorf("a file should get the file instruction, got:\n%s", system(file))
+	}
+	if system(in("hi")) != systemPrompt {
+		t.Error("an Input with no Kind should still be treated as a transcript")
+	}
+}
+
 func utf8Valid(s string) bool {
 	for _, r := range s {
 		if r == '�' {
