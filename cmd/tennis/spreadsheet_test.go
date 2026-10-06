@@ -14,10 +14,15 @@ import (
 // phonetic guide, an inline string, a boolean, a number, a formula with a
 // cached result, a gap column, an empty row, sheets whose relationship ids
 // are out of order with their workbook order, one absolute and one relative
-// part target, and cells whose style — built-in or custom — makes them dates.
+// part target, and cells whose style — built-in or custom — makes them dates
+// or times.
 func testWorkbook(t *testing.T) []byte {
 	t.Helper()
-	parts := map[string]string{
+	return zipOf(t, testWorkbookParts())
+}
+
+func testWorkbookParts() map[string]string {
+	return map[string]string{
 		"[Content_Types].xml": `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"/>`,
 		"xl/workbook.xml": `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
@@ -33,8 +38,8 @@ func testWorkbook(t *testing.T) []byte {
 </Relationships>`,
 		"xl/styles.xml": `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
-<numFmts count="2"><numFmt numFmtId="164" formatCode="yyyy\-mm\-dd\ hh:mm"/><numFmt numFmtId="165" formatCode="&quot;$&quot;#,##0.00;[Red]&quot;$&quot;#,##0.00"/></numFmts>
-<cellXfs count="4"><xf numFmtId="0"/><xf numFmtId="14"/><xf numFmtId="164"/><xf numFmtId="165"/></cellXfs>
+<numFmts count="3"><numFmt numFmtId="164" formatCode="yyyy\-mm\-dd\ hh:mm"/><numFmt numFmtId="165" formatCode="&quot;$&quot;#,##0.00;[Red]&quot;$&quot;#,##0.00"/><numFmt numFmtId="166" formatCode="[h]:mm"/></numFmts>
+<cellXfs count="6"><xf numFmtId="0"/><xf numFmtId="14"/><xf numFmtId="164"/><xf numFmtId="165"/><xf numFmtId="21"/><xf numFmtId="166"/></cellXfs>
 </styleSheet>`,
 		"xl/sharedStrings.xml": `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <sst xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" count="3" uniqueCount="3">
@@ -57,23 +62,9 @@ in one cell</v></c></row>
 		"xl/worksheets/sheet3.xml": `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData>
 <row r="1"><c r="A1" s="1"><v>46182</v></c><c r="B1" s="2"><v>46182.5</v></c><c r="C1" s="3"><v>842.5</v></c><c r="D1" s="0"><v>46182</v></c></row>
+<row r="2"><c r="A2" s="4" t="n"><v>0.3958333333333333</v></c><c r="B2" s="5"><v>1.5</v></c></row>
 </sheetData></worksheet>`,
 	}
-	var buf bytes.Buffer
-	zw := zip.NewWriter(&buf)
-	for name, body := range parts {
-		w, err := zw.Create(name)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if _, err := w.Write([]byte(body)); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if err := zw.Close(); err != nil {
-		t.Fatal(err)
-	}
-	return buf.Bytes()
 }
 
 // TestXLSXTextRendersSheetsAsRows: what the index sees is every sheet under
@@ -98,9 +89,31 @@ func TestXLSXTextRendersSheetsAsRows(t *testing.T) {
 		"## Trips",
 		"",
 		"2026-06-09\t2026-06-09 12:00\t842.5\t46182",
+		"09:30\t36:00",
 	}, "\n")
 	if got != want {
 		t.Errorf("xlsxText rendered:\n%s\n\nwant:\n%s", got, want)
+	}
+}
+
+// TestXLSXTextReadsStrictWorkbooks: a workbook saved as Strict Open XML,
+// which names its parts' relationships in the ISO namespace rather than the
+// transitional one, reads as the same workbook saved the usual way.
+func TestXLSXTextReadsStrictWorkbooks(t *testing.T) {
+	parts := testWorkbookParts()
+	for name, body := range parts {
+		body = strings.ReplaceAll(body, "http://schemas.openxmlformats.org/spreadsheetml/2006/main", "http://purl.oclc.org/ooxml/spreadsheetml/main")
+		parts[name] = strings.ReplaceAll(body, "http://schemas.openxmlformats.org/officeDocument/2006/relationships", "http://purl.oclc.org/ooxml/officeDocument/relationships")
+	}
+	if !strings.Contains(parts["xl/workbook.xml"], `xmlns:r="http://purl.oclc.org/ooxml/officeDocument/relationships"`) {
+		t.Fatal("the fixture did not become Strict")
+	}
+	want, err := xlsxText(testWorkbook(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, err := xlsxText(zipOf(t, parts)); err != nil || got != want {
+		t.Errorf("a Strict workbook: %v\n%s\n\nwant:\n%s", err, got, want)
 	}
 }
 
@@ -135,14 +148,40 @@ func TestColumnIndex(t *testing.T) {
 // TestDateFormats: a date is only a date because its style says so, and a
 // style says so with a built-in id or a custom code with date tokens in it —
 // outside the quoted and bracketed parts, where "Red" and "$" are not days.
+// A code with an hour or second and no year or day is a time of day, and
+// one with a bracketed [h] a span of hours.
 func TestDateFormats(t *testing.T) {
-	for code, want := range map[string]bool{
-		"yyyy-mm-dd": true, "d-mmm-yy": true, "[$-409]mmmm d, yyyy": true, "h:mm AM/PM": true,
-		"General": false, "0.00": false, "#,##0": false, "0%": false, "@": false,
-		`"$"#,##0.00;[Red]"$"#,##0.00`: false, `"Due" 0`: false, `0 \d`: false,
+	for code, want := range map[string]numKind{
+		"yyyy-mm-dd": dateNumber, "d-mmm-yy": dateNumber, "[$-409]mmmm d, yyyy": dateNumber, "mmmm": dateNumber,
+		"yyyy-mm-dd h:mm:ss": dateNumber, "m/d/yy h:mm AM/PM": dateNumber,
+		"h:mm": timeNumber, "h:mm:ss": timeNumber, "h:mm AM/PM": timeNumber, "hh:mm:ss.0": timeNumber, "mm:ss": timeNumber,
+		"[h]:mm": hoursNumber, "[hh]:mm:ss": hoursNumber, "[mm]:ss": hoursNumber, "[Red][h]:mm": hoursNumber,
+		"General": plainNumber, "0.00": plainNumber, "#,##0": plainNumber, "0%": plainNumber, "@": plainNumber,
+		`"$"#,##0.00;[Red]"$"#,##0.00`: plainNumber, `"Due" 0`: plainNumber, `0 \d`: plainNumber, "[Red]0": plainNumber,
 	} {
-		if got := isDateFormat(code); got != want {
-			t.Errorf("isDateFormat(%q) = %v, want %v", code, got, want)
+		if got := formatKind(code); got != want {
+			t.Errorf("formatKind(%q) = %v, want %v", code, got, want)
+		}
+	}
+	for id, want := range map[int]numKind{
+		0: plainNumber, 4: plainNumber, 14: dateNumber, 18: timeNumber, 20: timeNumber, 21: timeNumber,
+		22: dateNumber, 45: timeNumber, 46: hoursNumber, 49: plainNumber,
+	} {
+		if got := builtinKind(id); got != want {
+			t.Errorf("builtinKind(%d) = %v, want %v", id, got, want)
+		}
+	}
+	for serial, want := range map[string]string{
+		"0.3958333333333333": "09:30", "0.3960069444444445": "09:30:15", "46182.75": "18:00", "0": "00:00",
+		"0.99999999": "00:00", "not a number": "not a number", "-1": "-1",
+	} {
+		if got := excelTime(serial, false); got != want {
+			t.Errorf("excelTime(%q) = %q, want %q", serial, got, want)
+		}
+	}
+	for serial, want := range map[string]string{"1.5": "36:00", "1.510416666666667": "36:15", "0.3958333333333333": "9:30", "0.0000115740740741": "0:00:01"} {
+		if got := excelTime(serial, true); got != want {
+			t.Errorf("excelTime(%q, span) = %q, want %q", serial, got, want)
 		}
 	}
 	for serial, want := range map[string]string{

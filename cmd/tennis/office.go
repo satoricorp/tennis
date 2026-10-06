@@ -107,18 +107,37 @@ func zipPart(zr *zip.Reader, name string) *zip.File {
 // in breaks rendered as the whitespace they stand for. Only text inside a
 // paragraph counts, which is what leaves field codes and deleted runs out.
 // The text is held to room bytes, past which it is errTextCap.
+//
+// A text box is paragraphs inside a paragraph, anchored somewhere in its
+// runs. Its lines follow the line of the paragraph it sits in rather than
+// break into the middle of it. Word writes a text box twice, as a modern
+// shape and as an old one for readers that do not know the new, as the
+// branches of an mc:AlternateContent; only the first branch is read.
 func paragraphs(r io.Reader, breaks map[string]string, room int) (string, error) {
+	type para struct {
+		text   strings.Builder // its own text, when it is inside another
+		inside strings.Builder // the lines of the paragraphs inside it
+	}
 	dec := xml.NewDecoder(r)
 	var (
 		out    strings.Builder
-		depth  int // a text box nests paragraphs inside a paragraph
+		paras  []*para // by depth, kept for the next paragraph that deep
+		depth  int
+		used   int
+		chosen []bool // by open mc:AlternateContent: whether a branch was read
 		inText bool
 	)
-	write := func(s string) error {
-		if out.Len()+len(s) > room {
+	// line is where the innermost open paragraph's own text goes.
+	line := func() *strings.Builder {
+		if depth == 1 {
+			return &out
+		}
+		return &paras[depth-1].text
+	}
+	spend := func(n int) error {
+		if used += n; used > room {
 			return errTextCap
 		}
-		out.WriteString(s)
 		return nil
 	}
 	for {
@@ -131,29 +150,58 @@ func paragraphs(r io.Reader, breaks map[string]string, room int) (string, error)
 		}
 		switch t := tok.(type) {
 		case xml.StartElement:
-			switch {
-			case t.Name.Local == "p":
-				depth++
-			case t.Name.Local == "t":
+			switch name := t.Name.Local; {
+			case name == "AlternateContent":
+				chosen = append(chosen, false)
+			case (name == "Choice" || name == "Fallback") && len(chosen) > 0:
+				if chosen[len(chosen)-1] {
+					err = dec.Skip()
+				}
+				chosen[len(chosen)-1] = true
+			case name == "p":
+				if depth++; len(paras) < depth {
+					paras = append(paras, &para{})
+				}
+				p := paras[depth-1]
+				p.text.Reset()
+				p.inside.Reset()
+			case name == "t":
 				inText = depth > 0
-			case breaks[t.Name.Local] != "" && depth > 0:
-				err = write(breaks[t.Name.Local])
+			case breaks[name] != "" && depth > 0:
+				if err = spend(len(breaks[name])); err == nil {
+					line().WriteString(breaks[name])
+				}
 			}
 		case xml.EndElement:
 			switch t.Name.Local {
-			case "p":
-				if depth--; depth == 0 {
-					err = write("\n")
+			case "AlternateContent":
+				if len(chosen) > 0 {
+					chosen = chosen[:len(chosen)-1]
 				}
+			case "p":
+				if depth == 0 {
+					continue
+				}
+				if err = spend(1); err != nil {
+					break
+				}
+				p := paras[depth-1]
+				to := &out
+				if depth > 1 {
+					to = &paras[depth-2].inside
+					to.WriteString(p.text.String())
+				}
+				to.WriteByte('\n')
+				to.WriteString(p.inside.String())
+				depth--
 			case "t":
 				inText = false
 			}
 		case xml.CharData:
 			if inText {
-				if out.Len()+len(t) > room {
-					return "", errTextCap
+				if err = spend(len(t)); err == nil {
+					line().Write(t)
 				}
-				out.Write(t)
 			}
 		}
 		if err != nil {

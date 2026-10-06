@@ -64,6 +64,43 @@ func TestDocxText(t *testing.T) {
 	}
 }
 
+// TestDocxTextBoxes: Word writes a text box twice, as the modern shape and
+// the old one in the two branches of an mc:AlternateContent; it is read
+// once. Its paragraphs are lines of their own, after the line of the
+// paragraph it is anchored in rather than run into the middle of it, and a
+// box with only the old shape is still read.
+func TestDocxTextBoxes(t *testing.T) {
+	box := func(lines ...string) string {
+		var b strings.Builder
+		b.WriteString(`<w:txbxContent>`)
+		for _, l := range lines {
+			b.WriteString(`<w:p><w:pPr><w:jc w:val="center"/></w:pPr><w:r><w:t>` + l + `</w:t></w:r></w:p>`)
+		}
+		b.WriteString(`</w:txbxContent>`)
+		return b.String()
+	}
+	both := func(lines ...string) string {
+		return `<w:r><mc:AlternateContent><mc:Choice Requires="wps"><w:drawing><wp:anchor distT="0" distB="0"><wp:extent cx="1" cy="1"/>` +
+			`<a:graphic><a:graphicData uri="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"><wps:wsp><wps:txbx>` + box(lines...) +
+			`</wps:txbx><wps:bodyPr/></wps:wsp></a:graphicData></a:graphic></wp:anchor></w:drawing></mc:Choice>` +
+			`<mc:Fallback><w:pict><v:shape id="Text Box 1"><v:textbox>` + box(lines...) + `</v:textbox></v:shape></w:pict></mc:Fallback></mc:AlternateContent></w:r>`
+	}
+	doc := zipOf(t, map[string]string{
+		"word/document.xml": `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape" xmlns:v="urn:schemas-microsoft-com:vml" mc:Ignorable="wps"><w:body>
+<w:p><w:r><w:t xml:space="preserve">Body </w:t></w:r>` + both("Callout text", "Second callout line") + `<w:r><w:t>paragraph.</w:t></w:r></w:p>
+<w:p><w:r><w:t>Next paragraph.</w:t></w:r></w:p>
+<w:p><w:r><w:t>Old box:</w:t></w:r><w:r><mc:AlternateContent><mc:Fallback><w:pict><v:shape><v:textbox>` + box("Fallback only") + `</v:textbox></v:shape></w:pict></mc:Fallback></mc:AlternateContent></w:r></w:p>
+<w:p><w:r><w:t>Plain old box:</w:t></w:r><w:r><w:pict><v:shape><v:textbox>` + box("VML") + `</v:textbox></v:shape></w:pict></w:r><w:r><w:t>after</w:t></w:r></w:p>
+</w:body></w:document>`,
+	})
+	got, err := docxText(doc)
+	want := "Body paragraph.\nCallout text\nSecond callout line\nNext paragraph.\nOld box:\nFallback only\nPlain old box:after\nVML"
+	if err != nil || got != want {
+		t.Errorf("docxText:\n%q, %v\nwant:\n%q", got, err, want)
+	}
+}
+
 // TestPptxText: a deck is its slides in order — numeric order, so slide 10
 // does not come before slide 2 — each under its own heading.
 func TestPptxText(t *testing.T) {

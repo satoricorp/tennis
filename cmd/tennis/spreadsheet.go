@@ -3,6 +3,7 @@ package main
 import (
 	"archive/zip"
 	"bytes"
+	"cmp"
 	"encoding/xml"
 	"fmt"
 	"io"
@@ -22,10 +23,11 @@ import (
 //
 // What is kept: every sheet in workbook order under a heading carrying its
 // name, one line per row, cells separated by tabs so a row reads as a row,
-// and dates as dates — a date is stored as a day count, and which cells are
-// dates is known only to the cell styles, so those are read for that one
-// fact. What is dropped: everything else about formatting, and formulas,
-// whose cached results are kept in their place.
+// and dates and times as dates and times — a date is stored as a day count
+// and a time as a fraction of a day, and which cells are which is known only
+// to the cell styles, so those are read for that one fact. What is dropped:
+// everything else about formatting, and formulas, whose cached results are
+// kept in their place.
 
 // maxSheetCells bounds one workbook, the way maxSeedFileSize bounds a file.
 // Sheet XML compresses well, so the cap on the zip is no cap on what it
@@ -59,7 +61,11 @@ func xlsxText(body []byte) (string, error) {
 		} `xml:"workbookPr"`
 		Sheets []struct {
 			Name string `xml:"name,attr"`
-			RID  string `xml:"http://schemas.openxmlformats.org/officeDocument/2006/relationships id,attr"`
+			// A workbook saved as Strict Open XML names its relationships
+			// in the ISO standard's namespace rather than the transitional
+			// one; it is otherwise the same where it matters here.
+			RID       string `xml:"http://schemas.openxmlformats.org/officeDocument/2006/relationships id,attr"`
+			StrictRID string `xml:"http://purl.oclc.org/ooxml/officeDocument/relationships id,attr"`
 		} `xml:"sheets>sheet"`
 	}
 	if err := decodePart(open, "xl/workbook.xml", &book); err != nil {
@@ -107,12 +113,12 @@ func xlsxText(body []byte) (string, error) {
 			return "", fmt.Errorf("%s: %w", shared, err)
 		}
 	}
-	if wb.dates, err = dateStyles(open); err != nil {
+	if wb.styles, err = numberStyles(open); err != nil {
 		return "", err
 	}
 
 	for _, s := range book.Sheets {
-		target := targets[s.RID]
+		target := targets[cmp.Or(s.RID, s.StrictRID)]
 		if target == "" {
 			return "", fmt.Errorf("sheet %q has no part", s.Name)
 		}
@@ -152,7 +158,7 @@ func decodePart(open func(string) (io.ReadCloser, error), name string, v any) er
 // written and the cells to maxSheetCells, across all the sheets.
 type workbook struct {
 	strs      []string
-	dates     map[int]bool
+	styles    map[int]numKind
 	epoch1904 bool
 	cells     int
 	out       strings.Builder
@@ -306,8 +312,8 @@ func (wb *workbook) readSheet(r io.Reader, name string) error {
 				col := max(columnIndex(ref), last+1)
 				last = col
 				v := cellValue(typ, val.String(), wb.strs)
-				if (typ == "" || typ == "n") && wb.dates[style] {
-					v = excelDate(v, wb.epoch1904)
+				if typ == "" || typ == "n" {
+					v = wb.styles[style].render(v, wb.epoch1904)
 				}
 				if v == "" {
 					continue
@@ -403,10 +409,32 @@ func columnIndex(ref string) int {
 	return n - 1
 }
 
-// dateStyles reads the one fact styles.xml holds that is text: which cell
-// styles format a number as a date or time. A workbook with no styles part,
-// or one that does not parse, still reads; its dates stay day counts.
-func dateStyles(open func(string) (io.ReadCloser, error)) (map[int]bool, error) {
+// numKind is what a cell's style makes of the number in it.
+type numKind uint8
+
+const (
+	plainNumber numKind = iota
+	dateNumber          // a day count: a date, with the time of day if it has one
+	timeNumber          // the time of day alone, whatever day it is on
+	hoursNumber         // a span of time, in hours: [h]:mm
+)
+
+func (k numKind) render(raw string, epoch1904 bool) string {
+	switch k {
+	case dateNumber:
+		return excelDate(raw, epoch1904)
+	case timeNumber:
+		return excelTime(raw, false)
+	case hoursNumber:
+		return excelTime(raw, true)
+	}
+	return raw
+}
+
+// numberStyles reads the one fact styles.xml holds that is text: which cell
+// styles format a number as a date or a time. A workbook with no styles
+// part, or one that does not parse, still reads; its dates stay day counts.
+func numberStyles(open func(string) (io.ReadCloser, error)) (map[int]numKind, error) {
 	var st struct {
 		NumFmts []struct {
 			ID   int    `xml:"numFmtId,attr"`
@@ -422,34 +450,47 @@ func dateStyles(open func(string) (io.ReadCloser, error)) (map[int]bool, error) 
 		}
 		return nil, nil
 	}
-	custom := make(map[int]bool, len(st.NumFmts))
+	custom := make(map[int]numKind, len(st.NumFmts))
 	for _, f := range st.NumFmts {
-		custom[f.ID] = isDateFormat(f.Code)
+		custom[f.ID] = formatKind(f.Code)
 	}
-	out := map[int]bool{}
+	out := map[int]numKind{}
 	for i, xf := range st.Xfs {
-		if custom[xf.NumFmtID] || builtinDateFormat(xf.NumFmtID) {
-			out[i] = true
+		k, ok := custom[xf.NumFmtID]
+		if !ok {
+			k = builtinKind(xf.NumFmtID)
+		}
+		if k != plainNumber {
+			out[i] = k
 		}
 	}
 	return out, nil
 }
 
-// builtinDateFormat is the ranges of Excel's built-in number formats that are
-// dates and times, which a workbook uses without declaring them.
-func builtinDateFormat(id int) bool {
+// builtinKind is what Excel's built-in number formats, which a workbook
+// uses without declaring them, make of a number: 18 to 21 are h:mm and
+// h:mm:ss with and without AM/PM, 32 and 33 the same in East Asian
+// locales, 45 to 47 mm:ss, [h]:mm:ss and mmss.0; the rest of the ranges
+// here are dates.
+func builtinKind(id int) numKind {
 	switch {
-	case id >= 14 && id <= 22, id >= 27 && id <= 36, id >= 45 && id <= 47, id >= 50 && id <= 58:
-		return true
+	case id >= 18 && id <= 21, id == 32, id == 33, id == 45, id == 47:
+		return timeNumber
+	case id == 46:
+		return hoursNumber
+	case id >= 14 && id <= 22, id >= 27 && id <= 36, id >= 50 && id <= 58:
+		return dateNumber
 	}
-	return false
+	return plainNumber
 }
 
-// isDateFormat reports whether a custom format code renders a date or time:
-// any year, month, day, hour, or second token outside quoted literals and
-// the bracketed conditions, colours, and locale tags a code can carry.
-func isDateFormat(code string) bool {
-	inQuote, inBracket := false, false
+// formatKind reads a custom format code for what it renders, by its tokens
+// outside quoted literals and the bracketed conditions, colours, and locale
+// tags a code can carry: a year or day makes it a date; failing that, a
+// bracketed [h], [m] or [s] makes it a span of hours, and an hour or second
+// a time of day; an m with neither is a month.
+func formatKind(code string) numKind {
+	var date, hours, clock, month, inQuote bool
 	for i := 0; i < len(code); i++ {
 		c := code[i]
 		switch {
@@ -457,17 +498,37 @@ func isDateFormat(code string) bool {
 			i++ // an escaped literal character
 		case inQuote:
 			inQuote = c != '"'
-		case inBracket:
-			inBracket = c != ']'
 		case c == '"':
 			inQuote = true
 		case c == '[':
-			inBracket = true
-		case strings.IndexByte("ymdhsYMDHS", c) >= 0:
-			return true
+			end := strings.IndexByte(code[i:], ']')
+			if end < 0 {
+				i = len(code)
+				continue
+			}
+			if tag := strings.ToLower(code[i+1 : i+end]); tag != "" && strings.Trim(tag, "hms") == "" {
+				hours = true
+			}
+			i += end
+		case strings.IndexByte("ydYD", c) >= 0:
+			date = true
+		case strings.IndexByte("hsHS", c) >= 0:
+			clock = true
+		case c == 'm' || c == 'M':
+			month = true
 		}
 	}
-	return false
+	switch {
+	case date:
+		return dateNumber
+	case hours:
+		return hoursNumber
+	case clock:
+		return timeNumber
+	case month:
+		return dateNumber
+	}
+	return plainNumber
 }
 
 // excelDate renders a serial day count the way the sheet would. Excel counts
@@ -493,4 +554,27 @@ func excelDate(raw string, epoch1904 bool) string {
 		return t.Format("2006-01-02")
 	}
 	return t.Format("2006-01-02 15:04")
+}
+
+// excelTime renders the time a serial carries: the time of day, from its
+// fraction of a day, or with span the whole of it as hours, as [h]:mm
+// shows 1.5 as 36:00. Seconds are shown when there are any. A value that
+// is not a plausible serial is left as written.
+func excelTime(raw string, span bool) string {
+	serial, err := strconv.ParseFloat(strings.TrimSpace(raw), 64)
+	if err != nil || serial < 0 || serial >= 2958466 {
+		return raw
+	}
+	secs := int64(math.Round(serial * 86400))
+	if !span {
+		secs %= 86400
+	}
+	out := fmt.Sprintf("%02d:%02d", secs/3600, secs/60%60)
+	if span {
+		out = fmt.Sprintf("%d:%02d", secs/3600, secs/60%60)
+	}
+	if secs%60 != 0 {
+		out += fmt.Sprintf(":%02d", secs%60)
+	}
+	return out
 }
