@@ -551,11 +551,19 @@ func (a *archive) detect(want string) (plan, error) {
 	}
 
 	// Both agent transcripts are directories of JSONL, so telling them apart
-	// means reading one. Each sniff gets its own handle because sniffing
-	// consumes the reader.
+	// means reading one — and not simply the first one met. A real ~/.codex
+	// or ~/.claude keeps a history.jsonl at its root that is in neither
+	// shape, and the walk is lexical, so that file comes before any
+	// transcript. Keep going past what neither sniffer claims, within a
+	// bound that keeps a tree of unrelated JSONL cheap. Each sniff gets its
+	// own handle because sniffing consumes the reader.
+	sniffed := 0
 	for _, e := range a.entries {
 		if !strings.EqualFold(path.Ext(e.path), ".jsonl") {
 			continue
+		}
+		if sniffed++; sniffed > maxDetectSniffs {
+			break
 		}
 		for _, s := range []struct {
 			format string
@@ -574,7 +582,6 @@ func (a *archive) detect(want string) (plan, error) {
 				return plan{format: s.format}, nil
 			}
 		}
-		break
 	}
 
 	return plan{format: formatFiles}, nil
@@ -666,6 +673,12 @@ func sniffCodex(r io.Reader) bool {
 // file reads and command output, so the ceiling is well above what a message
 // needs — it exists to stop a corrupt file from being read as one line.
 const maxImportLineSize = 32 << 20
+
+// maxDetectSniffs bounds how many JSONL files detection reads before giving
+// up on the agent formats. The transcripts in a real ~/.codex or ~/.claude
+// sit behind a handful of files in other shapes, so the bound is generous
+// for them while a directory full of unrelated JSONL is skimmed, not read.
+const maxDetectSniffs = 50
 
 // --- the plain-files fallback ----------------------------------------------
 

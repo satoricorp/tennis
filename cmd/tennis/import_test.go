@@ -73,6 +73,21 @@ const codexSession = `{"timestamp":"2026-06-09T19:25:07.702Z","type":"session_me
 {"timestamp":"2026-06-09T19:25:22.000Z","type":"event_msg","payload":{"type":"token_count","total":123}}
 `
 
+// What a real ~/.codex and ~/.claude keep beside their transcripts: a
+// history.jsonl at the root, which a lexical walk visits first. Codex also
+// writes a session_index.jsonl there. None of it is in a transcript shape,
+// with one partial exception: lines Claude Code writes today carry a
+// sessionId (see claudeCodeHistory, below), lines older versions wrote do
+// not, and the sniffer reads the first few lines, which are the oldest.
+const codexHistory = `{"session_id":"S9","ts":1749497108,"text":"what hotel did we stay at in Mexico"}
+`
+
+const codexSessionIndex = `{"id":"S9","thread_name":"Hotel in Mexico","updated_at":"2026-06-09T19:25:20Z"}
+`
+
+const claudeCodeHistoryNoSessionID = `{"display":"the auth test is flaky","pastedContents":{},"project":"/Users/joe/git/x","timestamp":1786938424866}
+`
+
 // writeZip builds a zip from a name -> content map and returns its path.
 func writeZip(t *testing.T, name string, files map[string]string) string {
 	t.Helper()
@@ -145,6 +160,19 @@ func TestDetectFormats(t *testing.T) {
 		// Both agent formats are directories of JSONL, so the sniffers have to
 		// tell them apart rather than settle for "looks like a transcript".
 		{"codex transcripts", map[string]string{"sessions/rollout-S9.jsonl": codexSession}, formatCodex},
+		// A real ~/.codex or ~/.claude keeps a history.jsonl at its root, in
+		// neither transcript shape, and the walk is lexical, so detection has
+		// to look past the JSONL it cannot place rather than settle on the
+		// first one.
+		{"codex transcripts behind root history", map[string]string{
+			"history.jsonl":             codexHistory,
+			"session_index.jsonl":       codexSessionIndex,
+			"sessions/rollout-S9.jsonl": codexSession,
+		}, formatCodex},
+		{"claude code transcripts behind root history", map[string]string{
+			"history.jsonl":          claudeCodeHistoryNoSessionID,
+			"projects/repo/S1.jsonl": claudeCodeSession,
+		}, formatClaudeCode},
 		{"plain files", map[string]string{"notes/a.md": "# hello", "notes/b.txt": "world"}, formatFiles},
 		{"nested export still found", map[string]string{"export-2026/conversations.json": claudeExport}, formatClaude},
 	}
