@@ -3,6 +3,7 @@ package main
 import (
 	"archive/zip"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -377,6 +378,11 @@ func TestImportClaudeCode(t *testing.T) {
 	if got := recs[3].attr("role"); got != "assistant/subagent" {
 		t.Errorf("sidechain role: %q", got)
 	}
+	// A side-chain turn inside the session's own transcript is not a
+	// subagent's file, and has no file to be named for.
+	if _, ok := recs[3].Attrs["subagent"]; ok {
+		t.Errorf("an inline sidechain turn got a subagent attribute: %v", recs[3].Attrs)
+	}
 }
 
 func TestImportCodex(t *testing.T) {
@@ -531,6 +537,194 @@ func TestProjectOf(t *testing.T) {
 		project, worktree := projectOf(tc.cwd)
 		if project != tc.project || worktree != tc.worktree {
 			t.Errorf("projectOf(%q) = %q, %q; want %q, %q", tc.cwd, project, worktree, tc.project, tc.worktree)
+		}
+	}
+}
+
+// Where a transcript is stored names its project when no line says where it
+// ran. A subagent's is stored under its session, in the same project.
+func TestCCProjectDir(t *testing.T) {
+	for _, tc := range []struct {
+		stored   string
+		subagent bool
+		want     string
+	}{
+		{"projects/-Users-joe-git-tennis/S1.jsonl", false, "-Users-joe-git-tennis"},
+		{"/Users/joe/.claude/projects/-Users-joe-git-tennis/S1.jsonl", false, "-Users-joe-git-tennis"},
+		{"S1.jsonl", false, ""},
+		{"projects/-Users-joe-git-tennis/S1/subagents/agent-x.jsonl", true, "-Users-joe-git-tennis"},
+		{"-Users-joe-git-tennis/S1/subagents/workflows/wf_1/agent-x.jsonl", true, "-Users-joe-git-tennis"},
+		{"S1/subagents/agent-x.jsonl", true, ""},
+		{"/Users/joe/backup/agent-x.jsonl", true, "backup"},
+	} {
+		if got := ccProjectDir(tc.stored, tc.subagent); got != tc.want {
+			t.Errorf("ccProjectDir(%q, %v) = %q, want %q", tc.stored, tc.subagent, got, tc.want)
+		}
+	}
+}
+
+// A session moves — into a subdirectory, into a worktree, into another repo —
+// and every line records where it is at the time. It is filed under where it
+// started, and the directory, project and worktree all come from that one line,
+// so they cannot disagree.
+func TestImportClaudeCodeKeepsWhereTheSessionStarted(t *testing.T) {
+	const tennis, worktree = "/Users/joe/git/tennis", "/Users/joe/git/tennis/.claude/worktrees/wt-a"
+	for _, tc := range []struct {
+		name                 string
+		cwds                 []string
+		project, wt, wantCWD string
+	}{
+		{"into a subdirectory", []string{tennis, tennis + "/www"}, "tennis", "", tennis},
+		{"into a worktree", []string{tennis, worktree}, "tennis", "", tennis},
+		{"out of a worktree", []string{worktree, "/Users/joe/git/gx"}, "tennis", "wt-a", worktree},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var b strings.Builder
+			for i, cwd := range tc.cwds {
+				fmt.Fprintf(&b, `{"type":"user","uuid":"u%d","sessionId":"S1","cwd":%q,"message":{"role":"user","content":"turn %d"}}`+"\n", i, cwd, i)
+			}
+			recs := collect(t, writeTree(t, map[string]string{"-Users-joe-git-tennis/S1.jsonl": b.String()}), formatClaudeCode, perTurn)
+			if len(recs) != len(tc.cwds) {
+				t.Fatalf("got %d documents, want %d", len(recs), len(tc.cwds))
+			}
+			for _, r := range recs {
+				if got := r.attr("project"); got != tc.project {
+					t.Errorf("%s: project %q, want %q", r.ID, got, tc.project)
+				}
+				if got := r.attr("worktree"); got != tc.wt {
+					t.Errorf("%s: worktree %q, want %q", r.ID, got, tc.wt)
+				}
+				if got := r.attr("cwd"); got != tc.wantCWD {
+					t.Errorf("%s: cwd %q, want %q", r.ID, got, tc.wantCWD)
+				}
+			}
+		})
+	}
+}
+
+// A session that ran a subagent, as Claude Code stores it: the session's
+// transcript named for it, and the subagent's in a directory named for it
+// beside that, every line on the side chain and carrying the session's ID.
+// The subagent ran after the session moved into www, and its own lines say so.
+const claudeCodeParent = `{"type":"user","uuid":"u1","sessionId":"S1","timestamp":"2026-08-01T10:00:00.000Z","cwd":"/Users/joe/git/tennis","gitBranch":"main","message":{"role":"user","content":"the auth test is flaky"}}
+{"type":"assistant","uuid":"a1","sessionId":"S1","timestamp":"2026-08-01T10:00:05.000Z","cwd":"/Users/joe/git/tennis/www","gitBranch":"main","message":{"role":"assistant","content":[{"type":"text","text":"sending a subagent after the token clock"}]}}
+{"type":"ai-title","aiTitle":"Fixing the flaky auth test","sessionId":"S1"}
+`
+
+const claudeCodeSubagent = `{"type":"user","uuid":"su1","isSidechain":true,"sessionId":"S1","timestamp":"2026-08-01T10:00:06.000Z","cwd":"/Users/joe/git/tennis/www","gitBranch":"main","message":{"role":"user","content":"find the race in the token clock"}}
+{"type":"assistant","uuid":"sa1","isSidechain":true,"sessionId":"S1","timestamp":"2026-08-01T10:00:09.000Z","cwd":"/Users/joe/git/tennis/www","gitBranch":"main","message":{"role":"assistant","content":[{"type":"text","text":"the refresh window races the clock skew"}]}}
+`
+
+var claudeCodeWithSubagent = map[string]string{
+	"-Users-joe-git-tennis/S1.jsonl":                   claudeCodeParent,
+	"-Users-joe-git-tennis/S1/subagents/agent-x.jsonl": claudeCodeSubagent,
+}
+
+// A subagent's turns belong to the session that ran it: its ID, its title, the
+// place it started. What sets them apart is the subagent attribute, naming the
+// file, which only they carry.
+func TestImportClaudeCodeSubagent(t *testing.T) {
+	src := writeTree(t, claudeCodeWithSubagent)
+	sink := &docSink{}
+	var recs []docRecord
+	sink.capture = func(id, text string, attrs map[string]any) {
+		recs = append(recs, docRecord{ID: id, Text: text, Attrs: attrs})
+	}
+	rep, err := importPath(src, formatAuto, perTurn, defaultExt, sink, func(string) {}, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := rep["conversations"]; got != 1 {
+		t.Errorf("a session and its subagent are one conversation, report says %v", got)
+	}
+	if len(recs) != 4 {
+		t.Fatalf("got %d documents, want 4: %+v", len(recs), recs)
+	}
+	subs := 0
+	for _, r := range recs {
+		if got := r.attr("session"); got != "S1" {
+			t.Errorf("%s: session %q, want the parent's S1", r.ID, got)
+		}
+		if got := r.attr("title"); got != "Fixing the flaky auth test" {
+			t.Errorf("%s: title %q, want the session's", r.ID, got)
+		}
+		if got := r.attr("project"); got != "tennis" {
+			t.Errorf("%s: project %q, want where the session started", r.ID, got)
+		}
+		if got := r.attr("cwd"); got != "/Users/joe/git/tennis" {
+			t.Errorf("%s: cwd %q, want where the session started", r.ID, got)
+		}
+		sub, onSide := r.Attrs["subagent"], strings.HasSuffix(r.attr("role"), "/subagent")
+		if onSide != (sub != nil) {
+			t.Errorf("%s: role %q but subagent attribute %v", r.ID, r.attr("role"), sub)
+		}
+		if sub != nil {
+			subs++
+			if sub != "agent-x" {
+				t.Errorf("%s: subagent %v, want the file's name agent-x", r.ID, sub)
+			}
+			if !strings.HasPrefix(r.ID, "claude-code:S1:s") {
+				t.Errorf("subagent turn ID %q, want the session's ID and the message's", r.ID)
+			}
+		}
+	}
+	if subs != 2 {
+		t.Errorf("%d documents carry the subagent attribute, want the subagent's 2", subs)
+	}
+
+	// At conversation granularity the session and its subagent are a document
+	// each. Under one ID, whichever was written second replaced the other.
+	recs = collect(t, src, formatAuto, perConversation)
+	ids := map[string]docRecord{}
+	for _, r := range recs {
+		ids[r.ID] = r
+	}
+	if len(recs) != 2 || len(ids) != 2 {
+		t.Fatalf("want two distinct documents, got %+v", recs)
+	}
+	main, sub := ids["claude-code:S1"], ids["claude-code:S1:agent-x"]
+	if !strings.Contains(main.Text, "the auth test is flaky") || main.Attrs["subagent"] != nil {
+		t.Errorf("the session's document: %+v", main)
+	}
+	if !strings.Contains(sub.Text, "races the clock skew") || sub.attr("subagent") != "agent-x" || sub.attr("session") != "S1" {
+		t.Errorf("the subagent's document: %+v", sub)
+	}
+}
+
+// The session's card describes the session. A subagent's run is part of it
+// and gets no card of its own, which was an untitled stub beside the real one.
+func TestImportClaudeCodeSubagentHasNoCard(t *testing.T) {
+	dir := t.TempDir()
+	sum := &recordingSummarizer{}
+	w := addCards(t, writeTree(t, claudeCodeWithSubagent), formatClaudeCode, sum, dir)
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 || w.written != 1 || len(sum.seen) != 1 {
+		var names []string
+		for _, e := range entries {
+			names = append(names, e.Name())
+		}
+		t.Fatalf("want one card for the session, got %v (written %d, summarized %d)", names, w.written, len(sum.seen))
+	}
+	if !strings.Contains(entries[0].Name(), "fixing-the-flaky-auth-test") {
+		t.Errorf("the card should be the session's: %s", entries[0].Name())
+	}
+}
+
+// A subagent's transcript handed over on its own has no subagents directory
+// to be recognized by. Its lines still say what it is: every one on the side
+// chain, under a session that is not the one the file is named for.
+func TestImportClaudeCodeLoneSubagentFile(t *testing.T) {
+	src := writeTree(t, map[string]string{"agent-x.jsonl": claudeCodeSubagent})
+	recs := collect(t, filepath.Join(src, "agent-x.jsonl"), formatClaudeCode, perTurn)
+	if len(recs) != 2 {
+		t.Fatalf("got %d documents, want 2", len(recs))
+	}
+	for _, r := range recs {
+		if r.attr("subagent") != "agent-x" || r.attr("session") != "S1" {
+			t.Errorf("%s: subagent %q session %q, want agent-x in S1", r.ID, r.attr("subagent"), r.attr("session"))
 		}
 	}
 }
@@ -1172,6 +1366,88 @@ func TestImportClaudeCodeSkipsHistoryFile(t *testing.T) {
 		if !strings.HasPrefix(r.ID, "claude-code:") {
 			t.Errorf("unexpected document id %q", r.ID)
 		}
+	}
+}
+
+// A session that ran a subagent, added for real. At conversation granularity
+// the database holds two documents, where it held one because the second
+// write replaced the first; there is one card, the session's; and ls lists the
+// session once, under its title. That title holds when a subagent's turns
+// carry none, as they do when the subagent's file is added on its own.
+func TestAddSessionWithSubagent(t *testing.T) {
+	cache := ndjsonTestCache(t)
+	t.Setenv("TENNIS_CACHE", cache)
+	cardDir := filepath.Join(t.TempDir(), "cards")
+	t.Setenv("TENNIS_CARDS", cardDir)
+	t.Setenv("TENNIS_NS", "")
+	t.Setenv("ANTHROPIC_API_KEY", "")
+	t.Setenv("OPENAI_API_KEY", "")
+	dbPath := filepath.Join(t.TempDir(), "add.sqlite")
+	src := writeTree(t, claudeCodeWithSubagent)
+
+	add := func(args ...string) map[string]any {
+		t.Helper()
+		out, err := captureStdout(t, func() error {
+			return cmdAdd(append([]string{"--db", dbPath, "--json"}, args...))
+		})
+		if err != nil {
+			t.Fatalf("add %v: %v\noutput: %s", args, err, out)
+		}
+		return decodeImportResult(t, out)
+	}
+	ls := func(args ...string) []map[string]any {
+		t.Helper()
+		out, err := captureStdout(t, func() error {
+			return cmdLS(append([]string{"--db", dbPath, "--json", "-n", "0"}, args...))
+		})
+		if err != nil {
+			t.Fatalf("ls %v: %v\noutput: %s", args, err, out)
+		}
+		var rows []map[string]any
+		if err := json.Unmarshal([]byte(out), &rows); err != nil {
+			t.Fatalf("ls --json: %v\noutput: %s", err, out)
+		}
+		return rows
+	}
+	wantOneSession := func(rows []map[string]any, docs float64) {
+		t.Helper()
+		if len(rows) != 1 || rows[0]["key"] != "S1" || rows[0]["documents"] != docs {
+			t.Fatalf("ls: want the one session S1 with %v documents, got %v", docs, rows)
+		}
+		if attrs, _ := rows[0]["attributes"].(map[string]any); attrs["title"] != "Fixing the flaky auth test" {
+			t.Errorf("ls: the session's row should carry its title, got %v", rows[0])
+		}
+	}
+
+	if res := add("--per", "conversation", src); res["written"] != float64(2) {
+		t.Errorf("add --per conversation: want written=2, got %v", res)
+	}
+	docs := ls("--docs")
+	got := map[any]bool{}
+	for _, d := range docs {
+		got[d["id"]] = true
+	}
+	if len(docs) != 2 || !got["claude-code:S1"] || !got["claude-code:S1:agent-x"] {
+		t.Errorf("ls --docs: want the session's document and the subagent's, got %v", docs)
+	}
+	wantOneSession(ls(), 2)
+
+	const turns = "turns"
+	add("--ns", turns, src)
+	wantOneSession(ls("--ns", turns), 4)
+	add("--ns", turns, filepath.Join(src, "-Users-joe-git-tennis", "S1", "subagents", "agent-x.jsonl"))
+	wantOneSession(ls("--ns", turns), 4)
+
+	entries, err := os.ReadDir(cardDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 {
+		var names []string
+		for _, e := range entries {
+			names = append(names, e.Name())
+		}
+		t.Errorf("want only the session's card, got %v", names)
 	}
 }
 

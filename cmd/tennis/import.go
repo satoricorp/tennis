@@ -1017,6 +1017,10 @@ type conversation struct {
 	create string
 	extra  map[string]any // per-source attributes: project, cwd, branch
 	turns  []turn
+	// subagent names the subagent whose run this is, for a Claude Code
+	// subagent's transcript, and is empty for a session's own. The run is
+	// filed under the session that started it, so id is that session's.
+	subagent string
 }
 
 // emit writes a conversation out at the requested granularity.
@@ -1028,8 +1032,18 @@ func (c conversation) emit(per string, sink *docSink) error {
 	if len(c.turns) == 0 {
 		return nil
 	}
-	sink.cards.add(c.card())
+	// A subagent's run is part of its session, which the session's own card
+	// describes. A card of its own would be a second card for one session.
+	if c.subagent == "" {
+		sink.cards.add(c.card())
+	}
 	if per == perConversation {
+		// A session and each of its subagents are a document apiece, which
+		// one ID for all of them would have written over one another.
+		id := c.source + ":" + c.id
+		if c.subagent != "" {
+			id += ":" + c.subagent
+		}
 		var b strings.Builder
 		if c.title != "" {
 			b.WriteString("# " + c.title + "\n\n")
@@ -1041,7 +1055,7 @@ func (c conversation) emit(per string, sink *docSink) error {
 		attrs["kind"] = "conversation"
 		attrs["messages"] = len(c.turns)
 		return sink.add(tennis.Document{
-			ID:         c.source + ":" + c.id,
+			ID:         id,
 			Text:       strings.TrimSpace(b.String()),
 			Attributes: attrs,
 		})
@@ -1082,6 +1096,9 @@ func (c conversation) baseAttrs() map[string]any {
 	}
 	for k, v := range c.extra {
 		attrs[k] = v
+	}
+	if c.subagent != "" {
+		attrs["subagent"] = c.subagent
 	}
 	return attrs
 }

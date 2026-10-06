@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"path"
+	"path/filepath"
 	"strconv"
 	"strings"
 
@@ -449,7 +450,8 @@ type ccMessage struct {
 // noteCWD records where a session ran: the directory itself, the project it
 // belongs to, and the worktree it was in, if any. Both local importers use it,
 // so a search filtered by project finds Claude Code and Codex sessions alike,
-// and a card prints the same name for either.
+// and a card prints the same name for either. Each calls it once, with the
+// directory the session started in.
 func noteCWD(extra map[string]any, cwd string) {
 	extra["cwd"] = cwd
 	project, worktree := projectOf(cwd)
@@ -476,55 +478,118 @@ func projectOf(cwd string) (project, worktree string) {
 }
 
 // importClaudeCode reads local agent transcripts: one JSONL file per session,
-// as written under ~/.claude/projects.
+// as written under ~/.claude/projects, and one more per subagent the session
+// ran, under <session>/subagents.
 func importClaudeCode(a *archive, per string, sink *docSink, warn func(string)) (int, int, error) {
-	sessions, failed := 0, 0
+	// Subagents go last. Each is filed under the session that ran it, and
+	// takes that session's title and place from the main transcript, which
+	// has to have been read first — and a walk lists <session>/subagents
+	// before <session>.jsonl, which sorts after it.
+	var mains, subs []string
 	for _, e := range a.entries {
 		if !strings.EqualFold(path.Ext(e.path), ".jsonl") {
 			continue
 		}
-		f, err := a.open(e.path)
+		if inSubagents(e.path) {
+			subs = append(subs, e.path)
+		} else {
+			mains = append(mains, e.path)
+		}
+	}
+
+	// What a session's main transcript said about it, for its subagents.
+	// Only the attributes are kept: holding every session's turns until the
+	// end would cost the size of the whole history.
+	type sessionLabel struct {
+		title string
+		extra map[string]any
+	}
+	labels := map[string]sessionLabel{}
+	// Sessions, not files: a session and its subagents are one conversation.
+	sessions := map[string]bool{}
+	failed := 0
+	for _, p := range append(mains, subs...) {
+		f, err := a.open(p)
 		if err != nil {
 			failed++
 			warn(err.Error())
 			continue
 		}
-		conv, bad := readClaudeCodeSession(f, e.path, a, warn)
+		conv, bad := readClaudeCodeSession(f, p, a, warn)
 		f.Close()
 		failed += bad
 		if len(conv.turns) == 0 {
 			continue
 		}
-		sessions++
+		sessions[conv.id] = true
+		if conv.subagent == "" {
+			labels[conv.id] = sessionLabel{conv.title, conv.extra}
+		} else if l, ok := labels[conv.id]; ok {
+			// Session-level attributes are the same on every document in a
+			// session, so a filter by project finds all of it, and a hit in a
+			// subagent's turns carries a title a person recognizes.
+			conv.title, conv.extra = l.title, copyAttrs(l.extra)
+		}
 		if err := conv.emit(per, sink); err != nil {
-			return sessions, failed, err
+			return len(sessions), failed, err
 		}
 	}
-	return sessions, failed, nil
+	return len(sessions), failed, nil
+}
+
+// inSubagents reports whether a transcript sits in a session's subagents
+// directory, at any depth: a workflow's agents are under workflows/<run> there.
+func inSubagents(p string) bool {
+	for _, dir := range strings.Split(path.Dir(p), "/") {
+		if dir == "subagents" {
+			return true
+		}
+	}
+	return false
+}
+
+// ccProjectDir names a transcript's project from where it is stored, for a
+// transcript that never says where it ran. Transcripts sit one directory down
+// per project, in a directory named for the working directory with its slashes
+// turned to dashes (-Users-joe-git-tennis); a subagent's sits further down,
+// under <session>/subagents, and belongs to the project above that.
+func ccProjectDir(p string, subagent bool) string {
+	parts := strings.Split(path.Dir(p), "/")
+	if subagent {
+		for i := len(parts) - 1; i >= 0; i-- {
+			if parts[i] == "subagents" {
+				parts = parts[:max(i-1, 0)]
+				break
+			}
+		}
+	}
+	if len(parts) == 0 || parts[len(parts)-1] == "." {
+		return ""
+	}
+	return parts[len(parts)-1]
 }
 
 func readClaudeCodeSession(r io.Reader, entry string, a *archive, warn func(string)) (conversation, int) {
+	stem := strings.TrimSuffix(path.Base(entry), path.Ext(entry))
 	conv := conversation{
 		source: formatClaudeCode,
-		id:     strings.TrimSuffix(path.Base(entry), path.Ext(entry)),
+		id:     stem,
 		extra:  map[string]any{},
-	}
-	// The transcripts sit one directory down per project, in a directory
-	// named for the working directory with its slashes turned to dashes
-	// (-Users-joe-git-tennis). Nearly every line also records that working
-	// directory itself, which is the better record (see noteCWD); the
-	// directory name is the fallback for a transcript that never says where
-	// it ran.
-	if dir := path.Dir(entry); dir != "." && dir != "/" {
-		conv.extra["project"] = path.Base(dir)
-	} else if !a.isZip {
-		conv.extra["project"] = path.Base(a.root)
 	}
 
 	sc := bufio.NewScanner(r)
 	sc.Buffer(make([]byte, 64*1024), maxImportLineSize)
 
 	failed, n := 0, 0
+	// Where the session started. A session can move — cd into a
+	// subdirectory, or into another repo — and every line records where it
+	// is at the time, but it is filed under where it began: the place a
+	// person remembers starting it from.
+	firstCWD := ""
+	// A subagent's transcript is told apart by where it is stored, or failing
+	// that — a single file handed over on its own — by every message in it
+	// being on the side chain.
+	sideOnly, sawMessage := true, false
 	for sc.Scan() {
 		n++
 		raw := strings.TrimSpace(sc.Text())
@@ -543,11 +608,20 @@ func readClaudeCodeSession(r io.Reader, entry string, a *archive, warn func(stri
 		if l.SessionID != "" {
 			conv.id = l.SessionID
 		}
-		if l.CWD != "" {
+		if l.CWD != "" && firstCWD == "" {
+			firstCWD = l.CWD
 			noteCWD(conv.extra, l.CWD)
 		}
+		// The branch is the last one recorded, because a session often
+		// creates the branch it works on. It already belongs with the directory the
+		// session started in: Claude Code records that directory's branch on
+		// every line, wherever the session has moved to since.
 		if l.GitBranch != "" {
 			conv.extra["branch"] = l.GitBranch
+		}
+		if l.Message != nil {
+			sawMessage = true
+			sideOnly = sideOnly && l.IsSidechain
 		}
 		if conv.create == "" {
 			conv.create = normalizeTime(string(l.Timestamp))
@@ -595,6 +669,27 @@ func readClaudeCodeSession(r io.Reader, entry string, a *archive, warn func(stri
 	if err := sc.Err(); err != nil {
 		failed++
 		warn(fmt.Sprintf("%s: %v", entry, err))
+	}
+
+	// A subagent's lines carry the session that ran it, so its turns join
+	// that session; the file's own name tells one subagent from another. A
+	// main transcript is named for its session, which is what keeps one
+	// whose every turn is on the side chain from being taken for a subagent.
+	if inSubagents(entry) || (sawMessage && sideOnly && conv.id != stem) {
+		conv.subagent = stem
+	}
+
+	// Nearly every line records the working directory, which is the better
+	// record of where a session ran (see noteCWD); the directory the
+	// transcript is stored in is the fallback for one that never says.
+	if _, ok := conv.extra["project"]; !ok {
+		stored := entry
+		if !a.isZip {
+			stored = path.Join(filepath.ToSlash(a.root), entry)
+		}
+		if name := ccProjectDir(stored, conv.subagent != ""); name != "" {
+			conv.extra["project"] = name
+		}
 	}
 	return conv, failed
 }
