@@ -60,6 +60,21 @@ func TestCardCarriesFrontmatterAndPointer(t *testing.T) {
 	}
 }
 
+// TestCardNamesTheWorktree: a session run in a worktree is filed under the
+// repo it was cut from, so the worktree's name is the only place the card can
+// say which checkout it ran in.
+func TestCardNamesTheWorktree(t *testing.T) {
+	c := conv("Fix the flaky test", user("why is it flaky"))
+	c.extra = map[string]any{}
+	noteCWD(c.extra, "/Users/joe/git/tennis/.claude/worktrees/trusting-ardinghelli-d93106")
+
+	got := renderCard(c.card(), "", "")
+	want := "project: tennis\nworktree: trusting-ardinghelli-d93106\ncwd: /Users/joe/git/tennis/.claude/worktrees/trusting-ardinghelli-d93106\n"
+	if !strings.Contains(got, want) {
+		t.Errorf("card does not name the project, then the worktree, then the cwd:\n%s", got)
+	}
+}
+
 // TestCardSweepsStaleTitle: Claude Code names a session several turns in, so
 // importing twice can produce two slugs for one conversation. Without the
 // sweep the archive grows a second card every time a session gets retitled.

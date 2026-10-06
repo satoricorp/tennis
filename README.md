@@ -143,7 +143,7 @@ $ tennis search "that thing about session cookies"
   Claude [2025-03-15] 0.0328
 ```
 
-Every document carries the attributes needed to find its way home — `source`, `session`, `role`, `title`, `created`, and for local sessions `project`, `cwd` and `branch` — so a search can be narrowed the same way any other namespace can:
+Every document carries the attributes needed to find its way home — `source`, `session`, `role`, `title`, `created`, and for local sessions `project`, `cwd`, `branch` and, for a session run in a Claude Code worktree, `worktree` — so a search can be narrowed the same way any other namespace can:
 
 ```bash
 tennis search "retry logic" --where role=user

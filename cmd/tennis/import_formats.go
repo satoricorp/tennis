@@ -446,6 +446,35 @@ type ccMessage struct {
 	Content json.RawMessage `json:"content"`
 }
 
+// noteCWD records where a session ran: the directory itself, the project it
+// belongs to, and the worktree it was in, if any. Both local importers use it,
+// so a search filtered by project finds Claude Code and Codex sessions alike,
+// and a card prints the same name for either.
+func noteCWD(extra map[string]any, cwd string) {
+	extra["cwd"] = cwd
+	project, worktree := projectOf(cwd)
+	extra["project"] = project
+	if worktree != "" {
+		extra["worktree"] = worktree
+	}
+}
+
+// projectOf names the project a session ran in, from its working directory.
+// That is the directory's last element — except inside a worktree the desktop
+// app made under .claude/worktrees, where the last element is the worktree's
+// name and the project is the repo it was cut from. Most sessions on a machine
+// that uses worktrees run in one, so filing them under their own names would
+// leave `--where project=tennis` matching almost nothing.
+func projectOf(cwd string) (project, worktree string) {
+	const marker = "/.claude/worktrees/"
+	if i := strings.Index(cwd, marker); i >= 0 {
+		if name, _, _ := strings.Cut(cwd[i+len(marker):], "/"); name != "" {
+			return path.Base(cwd[:i]), name
+		}
+	}
+	return path.Base(cwd), ""
+}
+
 // importClaudeCode reads local agent transcripts: one JSONL file per session,
 // as written under ~/.claude/projects.
 func importClaudeCode(a *archive, per string, sink *docSink, warn func(string)) (int, int, error) {
@@ -480,8 +509,12 @@ func readClaudeCodeSession(r io.Reader, entry string, a *archive, warn func(stri
 		id:     strings.TrimSuffix(path.Base(entry), path.Ext(entry)),
 		extra:  map[string]any{},
 	}
-	// The transcripts sit one directory down per project, and that directory
-	// name is the only record of which repo a session belonged to.
+	// The transcripts sit one directory down per project, in a directory
+	// named for the working directory with its slashes turned to dashes
+	// (-Users-joe-git-tennis). Nearly every line also records that working
+	// directory itself, which is the better record (see noteCWD); the
+	// directory name is the fallback for a transcript that never says where
+	// it ran.
 	if dir := path.Dir(entry); dir != "." && dir != "/" {
 		conv.extra["project"] = path.Base(dir)
 	} else if !a.isZip {
@@ -511,7 +544,7 @@ func readClaudeCodeSession(r io.Reader, entry string, a *archive, warn func(stri
 			conv.id = l.SessionID
 		}
 		if l.CWD != "" {
-			conv.extra["cwd"] = l.CWD
+			noteCWD(conv.extra, l.CWD)
 		}
 		if l.GitBranch != "" {
 			conv.extra["branch"] = l.GitBranch
@@ -720,8 +753,7 @@ func readCodexSession(r io.Reader, entry string, warn func(string)) (conversatio
 				conv.id = m.ID
 			}
 			if m.CWD != "" {
-				conv.extra["cwd"] = m.CWD
-				conv.extra["project"] = path.Base(m.CWD)
+				noteCWD(conv.extra, m.CWD)
 			}
 			if conv.create == "" {
 				conv.create = normalizeTime(firstNonEmpty(m.Timestamp, l.Timestamp))

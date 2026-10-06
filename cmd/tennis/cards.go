@@ -460,7 +460,7 @@ func renderCard(c card, summary, by string) string {
 	if !isFile {
 		fmt.Fprintf(&b, "turns: %d\n", c.turns)
 	}
-	for _, k := range []string{"project", "cwd", "branch", "model", "size"} {
+	for _, k := range []string{"project", "worktree", "cwd", "branch", "model", "size"} {
 		if v := yamlScalar(c.meta[k]); v != "" {
 			fmt.Fprintf(&b, "%s: %s\n", k, v)
 		}

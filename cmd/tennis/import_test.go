@@ -326,7 +326,10 @@ func TestImportClaudeCode(t *testing.T) {
 	if got := recs[1].attr("branch"); got != "main" {
 		t.Errorf("branch attribute: %q", got)
 	}
-	if got := recs[1].attr("project"); got != "-Users-joe-git-tennis" {
+	// The project is the working directory's last element, not the dashed
+	// directory name the transcript sits under: it is what a Codex session
+	// stores, what a card prints, and what `--where project=tennis` names.
+	if got := recs[1].attr("project"); got != "tennis" {
 		t.Errorf("project attribute: %q", got)
 	}
 	// A message whose only block is a tool_use keeps its text and drops the
@@ -433,6 +436,73 @@ func TestImportClaudeCodeFromDirectory(t *testing.T) {
 	}
 	if got := recs[1].attr("cwd"); got != "/Users/joe/git/tennis" {
 		t.Errorf("cwd attribute: %q", got)
+	}
+	if got := recs[1].attr("project"); got != "tennis" {
+		t.Errorf("project attribute: %q", got)
+	}
+}
+
+// A transcript that never records where it ran still gets a project: the
+// directory it sits under, which is the working directory with its slashes
+// turned to dashes.
+func TestImportClaudeCodeProjectFallsBackToDirectory(t *testing.T) {
+	session := strings.ReplaceAll(claudeCodeSession, `"cwd":"/Users/joe/git/tennis",`, "")
+	recs := collect(t, writeZip(t, "sessions.zip", map[string]string{
+		"projects/-Users-joe-git-tennis/S1.jsonl": session,
+	}), formatAuto, perTurn)
+	if len(recs) != 4 {
+		t.Fatalf("got %d documents, want 4: %+v", len(recs), recs)
+	}
+	if got := recs[1].attr("cwd"); got != "" {
+		t.Errorf("cwd attribute should be absent, got %q", got)
+	}
+	if got := recs[1].attr("project"); got != "-Users-joe-git-tennis" {
+		t.Errorf("project attribute: %q", got)
+	}
+}
+
+// The desktop app runs most sessions in a worktree under .claude/worktrees,
+// where the working directory's last element is the worktree's name. Filing
+// those under their own names would leave `--where project=tennis` matching
+// only the sessions run at the repo root.
+func TestImportClaudeCodeInWorktree(t *testing.T) {
+	session := strings.ReplaceAll(claudeCodeSession,
+		`"cwd":"/Users/joe/git/tennis","gitBranch":"main"`,
+		`"cwd":"/Users/joe/git/tennis/.claude/worktrees/trusting-ardinghelli-d93106","gitBranch":"claude/trusting-ardinghelli-d93106"`)
+	recs := collect(t, writeZip(t, "sessions.zip", map[string]string{
+		"projects/-Users-joe-git-tennis--claude-worktrees-trusting-ardinghelli-d93106/S1.jsonl": session,
+	}), formatAuto, perTurn)
+	if len(recs) != 4 {
+		t.Fatalf("got %d documents, want 4: %+v", len(recs), recs)
+	}
+	if got := recs[1].attr("project"); got != "tennis" {
+		t.Errorf("project attribute: %q", got)
+	}
+	if got := recs[1].attr("worktree"); got != "trusting-ardinghelli-d93106" {
+		t.Errorf("worktree attribute: %q", got)
+	}
+	if got := recs[1].attr("cwd"); got != "/Users/joe/git/tennis/.claude/worktrees/trusting-ardinghelli-d93106" {
+		t.Errorf("cwd attribute: %q", got)
+	}
+	if got := recs[1].attr("branch"); got != "claude/trusting-ardinghelli-d93106" {
+		t.Errorf("branch attribute: %q", got)
+	}
+}
+
+func TestProjectOf(t *testing.T) {
+	for _, tc := range []struct {
+		cwd, project, worktree string
+	}{
+		{"/Users/joe/git/tennis", "tennis", ""},
+		{"/Users/joe/git/tennis/.claude/worktrees/trusting-ardinghelli-d93106", "tennis", "trusting-ardinghelli-d93106"},
+		{"/Users/joe/git/tennis/.claude/worktrees/trusting-ardinghelli-d93106/cmd/tennis", "tennis", "trusting-ardinghelli-d93106"},
+		{"/Users/joe/git/tennis/.claude/worktrees/", "worktrees", ""},
+		{"/Users/joe/git/gx", "gx", ""},
+	} {
+		project, worktree := projectOf(tc.cwd)
+		if project != tc.project || worktree != tc.worktree {
+			t.Errorf("projectOf(%q) = %q, %q; want %q, %q", tc.cwd, project, worktree, tc.project, tc.worktree)
+		}
 	}
 }
 
