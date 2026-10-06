@@ -5,6 +5,7 @@
     "getting-started",
     "cli",
     "importing",
+    "cards",
     "go-sdk",
     "http-api",
     "embedders",

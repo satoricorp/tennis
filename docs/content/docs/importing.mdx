@@ -37,14 +37,31 @@ tennis add --codex ~/.codex
 ```bash
 $ tennis add ~/Downloads/claude-export.zip
 tennis: created namespace "context" bound to builtin:potion-retrieval-32M
+tennis: summarizing cards with anthropic:claude-opus-5
 tennis: ~/Downloads/claude-export.zip: reading a Claude export (conversations.json, projects.json)
 tennis: 5000 documents in…
-imported 11423, skipped 0 unchanged, 14106 chunks in "context"
+imported 11423, skipped 0 unchanged, 14106 chunks in "context", 1209 cards in /Users/you/tennis
 
 $ tennis search "that thing about session cookies"
 > a session cookie with a refresh token is the usual shape…
+
   Claude [2025-03-15] 0.0328
 ```
+
+Two things came out of that. The documents went into the database, which is what `search` reads. Each conversation was also written as a markdown card to `~/tennis`, summarized because an API key was set — see [Cards](/cards). Pass `--no-cards` to skip them.
+
+To see what landed without searching for it:
+
+```bash
+$ tennis ls
+DATE             SOURCE         DOCS  TITLE
+2026-08-03 04:30 claude-code       2  TOML config parser with defaults
+2026-08-01 05:01 claude-code       3  Flaky auth test: token refresh window
+
+2 sessions
+```
+
+`ls` groups by session, newest first; `tennis ls chatgpt` narrows to one source, and `--docs` lists documents instead. The [CLI](/cli#tennis-ls) page has every flag.
 
 ## Turns or conversations
 
@@ -58,13 +75,16 @@ Whole threads are long, and a vector is the average of its tokens — see [why c
 
 ## Searching by attribute
 
-Every imported document carries the attributes needed to find its way home — `source`, `session`, `role`, `title`, `created`, and for local sessions `project`, `cwd`, and `branch`:
+Every imported document carries the attributes needed to find its way home — `source`, `session`, `role`, `title`, `created`, and for local sessions `project`, `cwd`, and `branch`. They work on `search` and on `ls` alike:
 
 ```bash
 tennis search "retry logic" --where role=user
 tennis search "flaky test" --where project=tennis,branch=main
 tennis search "the timeout" --where source=codex
+tennis ls --where branch=main
 ```
+
+A card's last line is the filter that pulls up its whole conversation: `tennis search --where 'session=<id>'`.
 
 Filters run before ranking, so a filtered query is faster than an unfiltered one.
 

@@ -37,7 +37,16 @@ curl -s localhost:8817/v1/namespaces/notes/write -d '{
 # {"written":1,"skipped":0,"chunks":1}
 ```
 
-The namespace is created on first write, bound to the built-in model. To bind it to something else, create it first with [`tennis ns create`](/cli#tennis-ns).
+The namespace is created on first write, bound to the built-in model. To bind it to something else, say so on that first write — `model` names a built-in model, `openai_model` an OpenAI one — or create it first with [`tennis ns create`](/cli#tennis-ns):
+
+```bash
+curl -s localhost:8817/v1/namespaces/notes/write -d '{
+  "openai_model": "text-embedding-3-small",
+  "documents": [{"id": "a1", "text": "make the login flow remember the user"}]
+}'
+```
+
+Both fields are read only when the namespace does not exist yet. On a namespace that already exists they are ignored, because the binding was fixed at creation and cannot be changed by a later request — see [Embedders](/embedders#how-the-binding-is-enforced). `openai_model` needs `OPENAI_API_KEY` in the environment of `tennis serve`, not of the client.
 
 ## Query
 
@@ -50,13 +59,30 @@ curl -s localhost:8817/v1/namespaces/notes/query -d '{
 
 `where` takes the same syntax as `--where` on the CLI: `key=value`, `key!=value`, `key>value`, comma-separated. `keyword_rank` and `semantic_rank` are 1-based, and `0` means that ranker did not surface the document at all.
 
-## List and delete
+## List, delete, health
 
 ```bash
 curl -s localhost:8817/v1/namespaces
+# [{"name":"notes","embedder_id":"builtin:potion-retrieval-32M","dims":512,"created_at":"2026-10-06T00:00:21Z","documents":1,"chunks":1}]
+
 curl -s localhost:8817/v1/namespaces/notes/delete -d '{"ids": ["a1"]}'
+# {"deleted":1}
+
 curl -s localhost:8817/health
+# {"status":"ok","version":"v0.1.0 (ee10c3ed7123)","db":"/Users/you/.tennis/db.sqlite"}
 ```
+
+`/health` reports the same version string as `tennis version` and the database file the server has open, so a client can tell which binary and which data it is talking to.
+
+## Errors
+
+Every error is a JSON body with one field:
+
+```json
+{"error": "namespace \"notes\": namespace does not exist"}
+```
+
+A namespace that does not exist is a `404`; a body that will not decode, a `where` that will not parse, or an invalid name is a `400`; everything else is a `500`. Request bodies are capped at 32MB.
 
 ## Python client, in full
 

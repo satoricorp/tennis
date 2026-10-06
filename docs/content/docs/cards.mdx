@@ -1,0 +1,89 @@
+---
+title: "Cards"
+description: "Every imported conversation also lands as a markdown card in ~/tennis — a readable copy, summarized when you have an API key."
+---
+
+Search answers a question. A card is for the other thing you do with history: read it. Every conversation `add` imports is written out as one markdown file, so a year of sessions becomes a folder you can open in any editor, grep, sync, or paste somewhere else.
+
+```bash
+$ tennis add ~/.claude
+tennis: summarizing cards with anthropic:claude-opus-5
+tennis: /Users/you/.claude: reading Claude Code session transcripts
+imported 5, skipped 0 unchanged, 5 chunks in "context", 2 cards in /Users/you/tennis
+
+$ ls ~/tennis
+2026-08-01-100000-claude-code-flaky-auth-test-token-refresh-window.md
+2026-08-03-093000-claude-code-toml-config-parser-with-defaults.md
+```
+
+## A card, in full
+
+```markdown
+---
+session: "claude-code:7f3a2c10-1b2e-4d5f-9a8b-0c1d2e3f4a5b"
+source: claude-code
+title: "Flaky auth test: token refresh window"
+created: 2026-08-01T10:00:00Z
+turns: 3
+project: -Users-you-git-app
+cwd: /Users/you/git/app
+branch: main
+---
+
+# Flaky auth test: token refresh window
+
+The auth test was failing about one run in five because the token refresh
+window was shorter than the test's sleep, so the second request ran with an
+expired token. The window was widened and a regression test added.
+
+Full conversation: `tennis search --where 'session=7f3a2c10-1b2e-4d5f-9a8b-0c1d2e3f4a5b'`
+```
+
+The frontmatter carries what the import knew: the document-id prefix as `session`, the `source`, the `title`, when it was `created`, how many `turns` it ran, and for local agent sessions the `project`, `cwd`, and `branch` when the transcript recorded them. The last line is how to get the rest — the card's whole job is to be readable on its own and to say where the full record lives.
+
+The filename is the UTC timestamp, the source, and a slug of the title: `2026-08-01-100000-claude-code-flaky-auth-test-token-refresh-window.md`. Claude Code names a session several turns in, so importing twice can produce two titles for one conversation; the timestamp-and-source prefix is stable, and a re-import replaces the older card rather than leaving both.
+
+## Where they go
+
+| | |
+|---|---|
+| `--cards <dir>` | write cards here instead |
+| `$TENNIS_CARDS` | the same, from the environment |
+| `--no-cards` | write none |
+
+The default is `~/tennis`. Plain files and `--ndjson` documents never get a card, because they are not conversations and there is nothing to summarize.
+
+## Summaries
+
+Writing the prose on a card is the one part of Tennis that needs a network and a key. Search does not: ranking runs entirely on the built-in embedder, so a machine with no key still finds everything it has indexed.
+
+Tennis looks for `ANTHROPIC_API_KEY` first, then `OPENAI_API_KEY`, and uses whichever it finds:
+
+| Key present | Model used |
+|---|---|
+| `ANTHROPIC_API_KEY` | `claude-opus-5` |
+| `OPENAI_API_KEY` | `gpt-4o-mini` |
+| neither | no summary; the card carries the opening message |
+
+`TENNIS_SUMMARY_MODEL` overrides the model for either provider — the lever for anyone summarizing a large backlog who would rather trade some quality for cost:
+
+```bash
+TENNIS_SUMMARY_MODEL=claude-haiku-4-5-20251001 tennis add ~/.claude
+```
+
+Without a key, cards are still written. Each carries the first thing the person typed, which is almost always the clearest statement of what they wanted, and the import says so once up front rather than failing:
+
+```bash
+$ tennis add ~/.claude
+tennis: no ANTHROPIC_API_KEY or OPENAI_API_KEY; cards will carry the opening message instead of a summary
+```
+
+Four summaries are in flight at a time, so a first import of several hundred conversations is bounded by the provider's rate limit rather than by one round trip after another. A summary that fails — a refusal, a timeout, a rate limit on conversation 300 — costs that card its prose and nothing else: the card is written with the opening message, the failure is reported on stderr, and the import carries on. With `--json` the counts come back as `cards` and `cards_unsummarized`.
+
+The summarizer sees the conversation's text, not its tool calls and results, with consecutive turns from one speaker merged. A very long session is cut in the middle — the opening carries what it set out to do and the end carries how it finished.
+
+## Why they are not indexed
+
+Tennis writes cards and never reads them back. The documents in SQLite are the record; a card is a rendering of one. That one-way rule is what makes cards safe to edit, move, delete, or hand to another tool without touching the archive.
+
+It is also why `tennis add ~/tennis` is not something to do. Indexing the cards would rank every conversation twice — once as a short, on-topic summary and once as the long transcript that actually holds the answer — and the summary would usually win.

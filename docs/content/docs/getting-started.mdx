@@ -46,33 +46,48 @@ You never named a namespace, so `add` used `context`, the default, and created i
 
 ```bash
 $ tennis search "keep me signed in"
-> # Session handling Make the login flow remember the user between sessions. The session cookie is se…
-  auth.md [2026-08-17] 0.0164
+> # Session handling
 
- 2. retry.md [2026-08-17] 0.0161  [sem#2]
-    # Retries Failed requests back off exponentially, doubling the delay each attempt up to a cap of th…
- 3. config.md [2026-08-17] 0.0159  [sem#3]
-    # Configuration Write a parser for TOML configuration files. Values from the file are merged over t…
+  Make the login flow remember the user between sessions. The session cookie is
+  set with an expiry so the browser keeps it after the tab closes.
+
+  auth.md [2026-10-05] 0.0328
 ```
 
-The query and the winning document share no words. `auth.md` came back because the vectors agree about what the sentence *means*.
+The query and the document share no words. `auth.md` came back because the vectors agree about what the sentence *means*.
 
-The best hit is printed as the answer — the words first, then where they came from and when. Below it the runners-up keep the ranked-list shape, because comparing them is the point.
+You get one result, printed whole: the words first, then where they came from, when, and how strongly it matched. You asked a question, so you get an answer you can actually read — not ten truncated lines to squint at.
+
+## Ask for more
+
+`-k` is how you ask to compare. Then every result is numbered, the best one included, because at that point you are reading a ranking rather than an answer:
+
+```bash
+$ tennis search "keep me signed in" -k 3
+ 1. auth.md [2026-10-05] 0.0328  [kw#1 sem#1]
+    # Session handling
+
+    Make the login flow remember the user between sessions. The session cookie
+    is set with an expiry so the browser keeps it after the tab closes.
+
+ 2. retry.md [2026-10-05] 0.0161  [sem#2]
+    # Retries
+
+    Failed requests back off exponentially, doubling the delay each attempt up
+    to a cap of thirty seconds.
+
+ 3. config.md [2026-10-05] 0.0159  [sem#3]
+    # Configuration
+
+    Write a parser for TOML configuration files. Values from the file are merged
+    over the defaults.
+```
 
 ## Read the tags
 
-The `[sem#2]` tag says which ranker found a hit, and where in that ranker's list. It is the difference between a result both rankers agreed on and one only the vectors liked:
+The `[kw#1 sem#1]` tag says which ranker found a hit, and where in that ranker's list. It is the difference between a result both rankers agreed on and one only the vectors liked.
 
-```bash
-$ tennis search "TOML"
-> # Configuration Write a parser for TOML configuration files. Values from the file are merged over t…
-  config.md [2026-08-17] 0.0328
-
- 2. retry.md [2026-08-17] 0.0161  [sem#2]
-    # Retries Failed requests back off exponentially, doubling the delay each attempt up to a cap of th…
-```
-
-`config.md` scores 0.0328 — twice the 0.0164 above — because BM25 and the vectors both ranked it first. A hit tagged with only one ranker and a low score is usually noise. Tennis has no relevance threshold and will not invent one; it shows you the evidence instead. See [How it works](/how-it-works#why-fuse-by-rank).
+`auth.md` scores 0.0328 because BM25 and the vectors both ranked it first. `retry.md` scores half that — the vectors put it second, and keyword search never found it at all. A hit tagged with only one ranker and a low score is usually noise. Tennis has no relevance threshold and will not invent one; it shows you the evidence instead. See [How it works](/how-it-works#why-fuse-by-rank).
 
 ## Re-indexing is nearly free
 
@@ -84,9 +99,30 @@ imported 0, skipped 3 unchanged, 0 chunks in "context"
 
 Unchanged files are never re-read into the model. Re-adding a large corpus after editing one file costs about as much as indexing one file.
 
+## Index your history
+
+Nothing to index yet? Start with the history you already have. Point `add` at a ChatGPT or Claude export zip, or at `~/.claude` or `~/.codex`, and search it in one command:
+
+```bash
+$ tennis add ~/.claude
+tennis: no ANTHROPIC_API_KEY or OPENAI_API_KEY; cards will carry the opening message instead of a summary
+tennis: /Users/you/.claude: reading Claude Code session transcripts
+imported 5, skipped 0 unchanged, 5 chunks in "context", 2 cards in /Users/you/tennis
+
+$ tennis ls
+DATE             SOURCE         DOCS  TITLE
+2026-08-03 04:30 claude-code       2  TOML config parser with defaults
+2026-08-01 05:01 claude-code       3  Flaky auth test: token refresh window
+
+2 sessions
+```
+
+`ls` shows what is there without running a search. The two cards are a readable copy of each conversation, written to `~/tennis` as it was imported — and summarized, if you set an API key. See [Importing sessions](/importing) and [Cards](/cards).
+
 ## Next steps
 
 - [CLI](/cli) — every command and flag
 - [Importing sessions](/importing) — index the agent and chat history you already have
+- [Cards](/cards) — the markdown copy of every conversation
 - [Go SDK](/go-sdk) and [HTTP API](/http-api) — using Tennis from code
 - [/llms.txt](/llms.txt) — machine-readable docs

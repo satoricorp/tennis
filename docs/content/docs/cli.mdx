@@ -1,13 +1,14 @@
 ---
 title: "CLI"
-description: "add, search, put, get, rm, ns, and serve — every flag, with real output."
+description: "add, search, ls, rm, ns, serve, and version — every flag, with real output."
 ---
 
-Two commands cover almost everything: `add` puts things in, `search` gets them out. Neither needs a namespace, because both default to `context`.
+Two commands cover almost everything: `add` puts things in, `search` gets them out. Neither needs a namespace, because both default to `context`. `ls` shows what is there.
 
 ```bash
 tennis add ~/Documents/notes
 tennis search "keep me signed in"
+tennis ls
 ```
 
 ## tennis add
@@ -41,6 +42,8 @@ Plain files are read by whatever reads their kind: text of any sort as it is; sp
 tennis add ./src --files --ext .go,.ts,.rs    # only these extensions (default: everything with text)
 tennis add ./docs --chunk 2000                # bigger chunks for a new namespace
 tennis add ~/.codex --ns work                 # a namespace other than the default
+tennis add ~/.claude --cards ~/notes/sessions # write the cards somewhere else
+tennis add ~/.claude --no-cards               # or not at all
 tennis add ./docs --json                      # machine-readable
 ```
 
@@ -49,6 +52,7 @@ tennis add ./docs --json                      # machine-readable
 | `--ns <name>` | namespace (default `context`, or `$TENNIS_NS`) |
 | `--format <fmt>` | `auto` (default), `chatgpt`, `claude`, `claude-code`, `codex`, `files` |
 | `--chatgpt` / `--claude` / `--claude-code` / `--codex` / `--files` | shorthand for `--format` |
+| `--ndjson` | read documents from stdin instead of a path; see [below](#tennis-add---ndjson) |
 | `--per <unit>` | one document per `turn` (default) or `conversation` |
 | `--ext <list>` | only these extensions, when the source is plain files (default: everything with text in it) |
 | `--cards <dir>` | where summary cards are written (default `~/tennis`, or `$TENNIS_CARDS`) |
@@ -56,10 +60,23 @@ tennis add ./docs --json                      # machine-readable
 | `--chunk <n>` | chunk size in characters, for a new namespace |
 | `--model <name>` | built-in model for a new namespace (default `potion-retrieval-32M`) |
 | `--openai <model>` | use an OpenAI model instead (requires `OPENAI_API_KEY`) |
+| `--cards <dir>` | where cards are written (default `~/tennis`, or `$TENNIS_CARDS`) |
+| `--no-cards` | skip writing cards |
 | `--db <path>` | database file (default `~/.tennis/db.sqlite`, or `$TENNIS_DB`) |
 | `--json` | machine-readable output on stdout; progress goes to stderr |
 
+Every conversation `add` imports is also written out as a card: one markdown file per session, with the session's details in frontmatter and a summary when you have an API key. Plain files and `--ndjson` documents get no card, because they are not conversations. [Cards](/cards) has the whole story.
+
+```bash
+$ tennis add ~/.claude
+tennis: no ANTHROPIC_API_KEY or OPENAI_API_KEY; cards will carry the opening message instead of a summary
+tennis: /Users/you/.claude: reading Claude Code session transcripts
+imported 5, skipped 0 unchanged, 5 chunks in "context", 2 cards in /Users/you/tennis
+```
+
 Re-running `add` is an incremental update. Files are keyed by path and skipped when contents and metadata are byte-identical to what is stored; session documents are keyed by the export's own conversation and message IDs, so a fresh export months later writes only what is new.
+
+Given several paths, a path that fails partway ends the run but not retroactively: what the earlier paths read is written and their cards are finished, the usual summary is printed, and the error is what the command exits on. With `--json` the report lists the sources that went in and carries the error beside them. A path that does not exist at all is refused before anything is read, so a typo never leaves an empty namespace behind.
 
 `add` refuses two kinds of junk when reading plain files, with a note on stderr: files containing binary content, and files over 10MB. Binary detection is a NUL-byte check in the leading 8KB, the same heuristic git uses.
 
@@ -67,7 +84,7 @@ Re-running `add` is an incremental update. Files are keyed by path and skipped w
 
 ```bash
 tennis search "exponential backoff"
-tennis search "keep me signed in" -n 5             # top 5
+tennis search "keep me signed in" -k 5             # top 5, not just the best
 tennis search "retry" --mode keyword               # BM25 only
 tennis search "retry" --mode semantic              # vectors only
 tennis search "auth" --where 'status=merged'       # filter by attribute
@@ -78,21 +95,58 @@ tennis search "auth" --json
 
 | Flag | Meaning |
 |---|---|
-| `-n <k>` | how many results (default 10) |
+| `-k <n>` | how many results (default 1; `-n` is an alias) |
 | `--mode <mode>` | `hybrid` (default), `keyword`, `semantic` |
 | `--where <filter>` | attribute filter: `key=value`, `key>value`, `key!=value`, comma-separated |
 | `--ns <name>` | namespace (default `context`, or `$TENNIS_NS`) |
 | `--db <path>` | database file |
 | `--json` | full results with scores and attributes |
 
+One result by default, printed whole: the words, then where they came from, when, and how strongly it matched. You asked a question, so you get an answer you can read, wrapped to your terminal.
+
+```bash
+$ tennis search "keep me signed in"
+> # Session handling
+
+  Make the login flow remember the user between sessions. The session cookie is
+  set with an expiry so the browser keeps it after the tab closes.
+
+  auth.md [2026-10-05] 0.0328
+```
+
+`-k` is how you ask for more. Then every result is numbered, the best one included, because at that point you are reading a ranking rather than an answer, and each carries a tag saying which ranker found it and where:
+
+```bash
+$ tennis search "keep me signed in" -k 3
+ 1. auth.md [2026-10-05] 0.0328  [kw#1 sem#1]
+    # Session handling
+
+    Make the login flow remember the user between sessions. The session cookie
+    is set with an expiry so the browser keeps it after the tab closes.
+
+ 2. retry.md [2026-10-05] 0.0161  [sem#2]
+    # Retries
+
+    Failed requests back off exponentially, doubling the delay each attempt up
+    to a cap of thirty seconds.
+
+ 3. config.md [2026-10-05] 0.0159  [sem#3]
+    # Configuration
+
+    Write a parser for TOML configuration files. Values from the file are merged
+    over the defaults.
+```
+
+`[kw#1 sem#1]` means BM25 and the vectors both ranked it first. `[sem#2]` means only the vectors found it; a hit one ranker surfaced is a different kind of answer than one both agreed on. Text is wrapped to the terminal's width, capped at 84 columns; when stdout is a pipe it is 80 columns and no color.
+
 When nothing matches, `search` says so rather than padding the list:
 
 ```bash
-$ tennis search "keep me signed in" --mode keyword
+$ tennis search "signed in" --mode keyword
 no matches
 ```
 
-That is `--mode keyword` doing its job: no document contains those words. The default hybrid mode would still return the semantic hits.
+That is `--mode keyword` doing its job: no document contains the word *signed*, and *in* is a stop word. The default hybrid mode would still return the semantic hits.
 
 `--json` includes each hit's stored attributes, not just its text and score:
 
@@ -116,6 +170,75 @@ That is `--mode keyword` doing its job: no document contains those words. The de
 ```
 
 `keyword_rank: 0` means BM25 did not return this document at all — the ranks are 1-based, and `0` is "absent", not "first".
+
+## tennis ls
+
+`ls` answers "what does tennis actually have" without running a search. It reads metadata only, so it stays fast at a size where search has started to cost real time.
+
+```bash
+$ tennis ls
+DATE             SOURCE         DOCS  TITLE
+2026-08-03 04:30 claude-code       2  TOML config parser with defaults
+2026-08-01 05:01 claude-code       3  Flaky auth test: token refresh window
+
+2 sessions
+```
+
+It groups by session rather than listing documents, because `add` stores one document per turn by default and a flat listing of those is thirty thousand rows nobody asked for. Newest first; dates are shown in your local time. A bare word filters by source, because `tennis ls chatgpt` is what people type before they read the flags:
+
+```bash
+tennis ls chatgpt                       # only ChatGPT sessions
+tennis ls claude-code                   # only Claude Code sessions
+tennis ls --where branch=main           # any attribute filter, same syntax as search
+tennis ls --docs                        # documents, not sessions
+tennis ls -n 50                         # more than the default 25
+tennis ls -n 0                          # everything
+tennis ls --offset 25                   # the next page
+tennis ls --asc                         # oldest first
+tennis ls --docs --sort name            # by another attribute
+tennis ls --json
+```
+
+| Flag | Meaning |
+|---|---|
+| `--docs` | list documents instead of grouping by session |
+| `-n <count>` | how many to list (default 25; `0` for all) |
+| `--offset <count>` | skip this many |
+| `--where <filter>` | attribute filter, same syntax as `search` |
+| `--sort <attr>` | attribute to sort by (default `created`) |
+| `--asc` | oldest first |
+| `--ns <name>` | namespace (default `context`, or `$TENNIS_NS`) |
+| `--db <path>` | database file |
+| `--json` | machine-readable output |
+
+`--docs` is the flat view. Plain files show up here with their path as the id, since a file is not a session:
+
+```bash
+$ tennis ls --docs -n 4
+DATE             SOURCE       KIND     CHUNKS  ID
+2026-08-03 04:30 claude-code  message       1  claude-code:b81e9d44-6c7a-4e2b-8f1d-3a4b5c6d7e8…
+2026-08-03 04:30 claude-code  message       1  claude-code:b81e9d44-6c7a-4e2b-8f1d-3a4b5c6d7e8…
+2026-08-01 05:01 claude-code  message       1  claude-code:7f3a2c10-1b2e-4d5f-9a8b-0c1d2e3f4a5…
+2026-08-01 05:00 claude-code  message       1  claude-code:7f3a2c10-1b2e-4d5f-9a8b-0c1d2e3f4a5…
+
+4 of 8 documents (--offset 4 for more, -n 0 for all)
+```
+
+The tally under the table goes to stderr, so `tennis ls --json | jq` sees only the rows. In the session view `--json` gives each group's key, document and chunk counts, and the attributes shared across the group:
+
+```json
+[
+  {
+    "key": "b81e9d44-6c7a-4e2b-8f1d-3a4b5c6d7e8f",
+    "documents": 2,
+    "chunks": 2,
+    "attributes": {
+      "created": "2026-08-03T09:30:08Z",
+      "source": "claude-code"
+    }
+  }
+]
+```
 
 ## tennis add --ndjson
 
@@ -182,11 +305,18 @@ tennis serve --addr 127.0.0.1:9000
 tennis version                                 # tag and the commit it was built from
 ```
 
-`rm` takes document ids and reads `--ns` like `add` and `search` do; `tennis ns rm` is the one that removes a whole namespace.
+`rm` takes document ids and reads `--ns` like `add` and `search` do; `tennis ns rm` is the one that removes a whole namespace. `rm` used to take the namespace first, and that spelling would still run — against the wrong namespace, deleting a document named after the right one — so it is refused rather than obeyed:
+
+```bash
+$ tennis rm agents e1
+error: rm takes ids, not a namespace: try `tennis rm e1 --ns agents`
+```
+
+`version` prints the release tag and the commit the binary was actually built from. A build from a working tree has no tag, so it says `dev` and leans on the commit, with `dirty` appended when the tree had uncommitted changes; a `go install ...@version` binary carries no commit and reports the module version instead.
 
 ```bash
 $ tennis version
-tennis v0.2.0 (b489e77ca87b)
+tennis v0.1.0 (ee10c3ed7123)
 ```
 
 `serve` is documented in full under [HTTP API](/http-api).
@@ -196,16 +326,61 @@ tennis v0.2.0 (b489e77ca87b)
 | Flag | Meaning |
 |---|---|
 | `--db <path>` | database file (default `~/.tennis/db.sqlite`, or `$TENNIS_DB`) |
-| `--ns <name>` | namespace for `add` and `search` (default `context`, or `$TENNIS_NS`) |
+| `--ns <name>` | namespace for `add`, `ls`, `search` and `rm` (default `context`, or `$TENNIS_NS`) |
+| `--cards <dir>` | where `add` writes cards (default `~/tennis`, or `$TENNIS_CARDS`) |
 | `--json` | machine-readable output on stdout; progress goes to stderr |
 
-## Naming the namespace positionally
+Flags may come before, between, or after positional arguments: `tennis search --ns work "retry"` and `tennis search "retry" --ns work` are the same command.
 
-`add`, `search` and `rm` take the namespace as a flag so that the common case needs no namespace at all. Three older commands take it as the first argument instead, and still work:
+## The full surface
+
+`tennis --help` lists the six commands a person reaches for and stops. The rest of the surface is still supported and tested, just not advertised; `tennis --agents` prints all of it, as plain text without the logo, because the reader is usually a program:
+
+```bash
+$ tennis --agents
+tennis — local hybrid search. Keyword + semantic, one file, no server.
+
+USAGE
+  tennis <command> [flags]
+
+COMMANDS
+  add <path...>                index sessions or files
+  search <query>               search
+  ls [source]                  list what tennis has, newest first
+  rm <id...>                   delete documents
+  ns [list|create|rm]          manage namespaces
+  version
+
+ALSO AVAILABLE
+  serve                        start the local HTTP API on 127.0.0.1:8817
+  seed <namespace> <path...>   like add --files, namespace first
+  import <namespace> <path...> like add, namespace first
+  match <namespace> <query>    like search, namespace first
+
+SOURCES
+  tennis add --chatgpt <export.zip>       a ChatGPT export
+  tennis add --claude <export.zip>        a Claude export
+  tennis add --claude-code ~/.claude      Claude Code transcripts
+  tennis add --codex ~/.codex             Codex transcripts
+  tennis add --files ~/Documents/notes    plain files
+  tennis add --ndjson < docs.ndjson       documents from a program, on stdin
+  Without a source flag, add reads the path and works out which it is.
+
+COMMON FLAGS
+  --db <path>    database file (default ~/.tennis/db.sqlite, or $TENNIS_DB)
+  --cards <dir>  where summary cards are written (default ~/tennis, or $TENNIS_CARDS)
+  --ns <name>    namespace for add, ls, search and rm (default context, or $TENNIS_NS)
+  --json         machine-readable output
+
+Run 'tennis <command> --help' for command flags.
+```
+
+`tennis help --agents` prints the same thing. Both screens are assembled from the same pieces, so the two cannot drift apart.
+
+The three commands under "also available" are `add` and `search` with the namespace spelled first, from before `--ns` existed:
 
 ```bash
 tennis seed notes ./docs                       # like tennis add --files ./docs --ns notes
 tennis import history ~/Downloads/export.zip   # like tennis add ~/Downloads/export.zip --ns history
 tennis match notes "keep me signed in"         # like tennis search "keep me signed in" --ns notes
 ```
-

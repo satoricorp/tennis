@@ -37,16 +37,18 @@ Tennis never reads that variable to *decide* whether to use OpenAI — only to u
 ## "no matches"
 
 ```bash
-$ tennis search "keep me signed in" --mode keyword
+$ tennis search "signed in" --mode keyword
 no matches
 ```
 
-In `--mode keyword` this is literal: no indexed document contains those words. Drop `--mode` to let the vectors answer.
+In `--mode keyword` this is literal: no indexed document contains those words. Keyword search matches any of the query's terms, with stop words such as *in* and *the* dropped first, so this means *signed* appears nowhere. Drop `--mode` to let the vectors answer.
 
 In hybrid mode, `no matches` means the namespace is empty or your `--where` filter excluded everything. Check what is there:
 
 ```bash
-tennis ns list
+tennis ls                     # sessions, newest first
+tennis ls --where source=codex
+tennis ns list                # every namespace and its counts
 ```
 
 ## "no indexable files in … (looking for any file with text, N skipped)"
@@ -94,6 +96,19 @@ rm -rf ~/.cache/tennis && tennis search "anything"
 
 If it persists, the upstream file genuinely changed, which is a bug to report rather than work around: a silently different model would change every vector the install ever produces.
 
+## "rm takes ids, not a namespace"
+
+```bash
+$ tennis rm agents e1
+error: rm takes ids, not a namespace: try `tennis rm e1 --ns agents`
+```
+
+`rm` used to take the namespace first. The old spelling would still run — against the default namespace, deleting a document that happens to be named after the one you meant — so when the first argument is a namespace that exists, Tennis refuses and shows the spelling it wants. `tennis ns rm <name>` is the command that removes a whole namespace.
+
+## "no ANTHROPIC_API_KEY or OPENAI_API_KEY; cards will carry the opening message"
+
+Not an error. Every imported conversation is written to `~/tennis` as a markdown card, and the summary on the card needs a model. Without a key the card carries the first thing you typed instead; set either key and re-run `add` to fill in the prose, or pass `--no-cards` if you do not want them. Search is unaffected either way. See [Cards](/cards).
+
 ## "cannot parse filter … (want key=value, key>value, …)"
 
 `--where` takes comma-separated comparisons, no spaces around the operator:
@@ -128,7 +143,7 @@ Bad lines are reported with their line number and skipped; the good ones are sti
 
 ## Results are there, but bad
 
-Tennis has no relevance threshold — semantic search ranks everything, so a query always returns up to `-n` results even when nothing is a good match. Read the evidence rather than the position:
+Tennis has no relevance threshold — semantic search ranks everything, so a query always returns up to `-k` results even when nothing is a good match. Read the evidence rather than the position:
 
 - A hit tagged with only one ranker (`[sem#3]`) at a low score is usually noise.
 - A hit both rankers put first scores about `0.0328`; one ranker alone tops out near `0.0164`. See [why fuse by rank](/how-it-works#why-fuse-by-rank).
@@ -145,4 +160,4 @@ rm ~/.tennis/db.sqlite        # everything indexed
 rm -rf ~/.cache/tennis        # the downloaded model
 ```
 
-Nothing else on your machine is state.
+The cards in `~/tennis` (or `$TENNIS_CARDS`) are ordinary markdown files that Tennis writes and never reads back; delete any you do not want. Nothing else on your machine is state.

@@ -6,8 +6,9 @@
 
 - [Tennis](https://satoricorp.github.io/tennis/docs/): Local hybrid search. Keyword and semantic in one ranking, one binary, one SQLite file, no server.
 - [Getting Started](https://satoricorp.github.io/tennis/docs/getting-started): Install Tennis, index a directory, and run the search that shows why hybrid ranking matters.
-- [CLI](https://satoricorp.github.io/tennis/docs/cli): add, search, put, get, rm, ns, and serve — every flag, with real output.
+- [CLI](https://satoricorp.github.io/tennis/docs/cli): add, search, ls, rm, ns, serve, and version — every flag, with real output.
 - [Importing sessions](https://satoricorp.github.io/tennis/docs/importing): Index ChatGPT and Claude exports, and Claude Code and Codex transcripts, then search them by attribute.
+- [Cards](https://satoricorp.github.io/tennis/docs/cards): Every imported conversation also lands as a markdown card in ~/tennis — a readable copy, summarized when you have an API key.
 - [Go SDK](https://satoricorp.github.io/tennis/docs/go-sdk): Open a database, create a namespace, write documents, and query with filters from Go.
 - [HTTP API](https://satoricorp.github.io/tennis/docs/http-api): tennis serve exposes write, query, delete, and list over loopback — for every language that isn't Go.
 - [Embedders](https://satoricorp.github.io/tennis/docs/embedders): The built-in static model, switching to OpenAI, and why a namespace is bound to one embedder for life.
