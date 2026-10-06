@@ -566,6 +566,10 @@ func TestImportEndToEnd(t *testing.T) {
 	cache := ndjsonTestCache(t)
 	t.Setenv("TENNIS_CACHE", cache)
 	t.Setenv("TENNIS_CARDS", t.TempDir())
+	// No key, so no card reaches an API and the card counts do not depend on
+	// whether one did.
+	t.Setenv("ANTHROPIC_API_KEY", "")
+	t.Setenv("OPENAI_API_KEY", "")
 	dbPath := filepath.Join(t.TempDir(), "import.sqlite")
 	const ns = "history"
 
@@ -583,6 +587,10 @@ func TestImportEndToEnd(t *testing.T) {
 	res := decodeImportResult(t, out)
 	if res["written"] != float64(4) || res["skipped"] != float64(0) || res["failed"] != float64(0) {
 		t.Fatalf("first import: want written=4 skipped=0 failed=0, got %v", res)
+	}
+	cards := res["cards"]
+	if cards == float64(0) {
+		t.Fatalf("first import wrote no cards: %v", res)
 	}
 	sources, _ := res["sources"].([]any)
 	if len(sources) != 1 {
@@ -603,6 +611,10 @@ func TestImportEndToEnd(t *testing.T) {
 	res = decodeImportResult(t, out)
 	if res["written"] != float64(0) || res["skipped"] != float64(4) {
 		t.Errorf("repeat import: want written=0 skipped=4, got %v", res)
+	}
+	// And so must its cards: with a key, each one written again is a call.
+	if res["cards"] != float64(0) || res["cards_unchanged"] != cards {
+		t.Errorf("repeat import: want cards=0 cards_unchanged=%v, got %v", cards, res)
 	}
 
 	// And the point of all of it: the history is searchable, with the

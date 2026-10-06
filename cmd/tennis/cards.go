@@ -1,11 +1,14 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -20,13 +23,19 @@ import (
 // A card is a readable markdown summary of one conversation or one file,
 // written to ~/tennis as it is imported.
 //
-// tennis writes cards and never reads them back. The documents in SQLite are
+// tennis never reads a card back into the archive. The documents in SQLite are
 // the record; a card is a rendering of one. That one-way rule is what makes
 // them safe to edit, move, delete, or paste into another tool without
 // corrupting the archive — and it is why they are not indexed. Indexing them
 // would rank a conversation twice, once as its short on-topic summary and once
 // as the long transcript that actually holds the answer, and the summary would
 // usually win.
+//
+// The one thing an import does read is a card's own frontmatter, to learn
+// whether the card already describes what is being imported. Re-adding
+// ~/.claude is hundreds of conversations that have not changed, and writing
+// their cards again would be hundreds of model calls that say what the cards
+// already say.
 
 // defaultCardDir is where cards go. It honors TENNIS_CARDS the way defaultDB
 // honors TENNIS_DB, so tests and sandboxes can redirect it — without that, a
@@ -63,6 +72,23 @@ type card struct {
 	text     string // what the summarizer reads
 	fallback string // what the card carries instead when there is no summary
 	pointer  string // the line that says how to get the rest
+}
+
+// digest identifies what a card describes: the text the summarizer reads and
+// every field the frontmatter shows. An import compares it with the digest on
+// the card already on disk to tell whether writing the card again would only
+// repeat what it says. Layout is left out on purpose — a change to how cards
+// look should not cost a model call for every card in the folder — and so is
+// the time that names a thread's card, because a card that moves is a card
+// that is missing, and gets written anyway.
+func (c card) digest() string {
+	meta, _ := json.Marshal(c.meta)
+	h := sha256.New()
+	for _, s := range []string{c.kind, c.source, c.id, c.title, c.stamp, strconv.Itoa(c.turns), string(meta), c.text, c.fallback} {
+		io.WriteString(h, s)
+		h.Write([]byte{0})
+	}
+	return hex.EncodeToString(h.Sum(nil)[:8])
 }
 
 // card is the conversation as the card writer sees it.
@@ -148,9 +174,10 @@ type cardWriter struct {
 	// gets there first must not matter.
 	once sync.Once
 
-	mu      sync.Mutex
-	written int
-	failed  int
+	mu        sync.Mutex
+	written   int
+	failed    int
+	unchanged int
 }
 
 // newCardWriter starts the workers. A nil Summarizer is allowed: cards are
@@ -196,14 +223,22 @@ func (w *cardWriter) close() {
 	})
 }
 
-// one summarizes and writes a single card.
+// one summarizes and writes a single card, unless the card on disk already
+// describes it.
 //
 // A failed summary costs that card its prose and nothing else. An import is
 // hundreds of calls, and a refusal, timeout, or rate limit at number 300 must
 // not discard the 299 already written — so every failure degrades to the
-// opening message and is counted.
+// opening message and is counted. The card says it carries no summary, so the
+// next import tries again.
 func (w *cardWriter) one(c card) {
-	text := c.fallback
+	if w.current(c) {
+		w.mu.Lock()
+		w.unchanged++
+		w.mu.Unlock()
+		return
+	}
+	text, by := c.fallback, ""
 	if w.sum != nil {
 		in := summarize.Input{
 			Kind:       c.kind,
@@ -219,7 +254,7 @@ func (w *cardWriter) one(c card) {
 		got, err := w.sum.Summarize(w.ctx, in)
 		switch {
 		case err == nil && strings.TrimSpace(got) != "":
-			text = got
+			text, by = got, w.sum.Provider()
 		case err != nil:
 			w.mu.Lock()
 			w.failed++
@@ -227,13 +262,55 @@ func (w *cardWriter) one(c card) {
 			fmt.Fprintf(os.Stderr, "tennis: summarizing %s: %v\n", c.id, err)
 		}
 	}
-	if err := writeCard(w.dir, c, text); err != nil {
+	if err := writeCard(w.dir, c, text, by); err != nil {
 		fmt.Fprintf(os.Stderr, "tennis: card for %s: %v\n", c.id, err)
 		return
 	}
 	w.mu.Lock()
 	w.written++
 	w.mu.Unlock()
+}
+
+// current reports whether the card already on disk describes c: its digest
+// matches, and it carries a summary or there is still no model to write one.
+// So an unchanged conversation costs nothing, a card the person deleted comes
+// back, a card that fell back to the opening is summarized once a key is set
+// or the failure has passed, and a run with no key leaves the summaries an
+// earlier run paid for where they are. The person's own edits to a card's
+// body survive too, until what it describes changes.
+func (w *cardWriter) current(c card) bool {
+	stem, _ := cardStem(c)
+	fm := frontmatter(filepath.Join(w.dir, stem+".md"))
+	if fm["digest"] != c.digest() {
+		return false
+	}
+	_, summarized := fm["summarizer"]
+	return summarized || w.sum == nil
+}
+
+// frontmatter reads the block at the top of a card as raw key-value pairs. A
+// card that is missing, unreadable, or no longer opens with frontmatter reads
+// as empty, which means write it again.
+func frontmatter(path string) map[string]string {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil
+	}
+	defer f.Close()
+	sc := bufio.NewScanner(f)
+	if !sc.Scan() || sc.Text() != "---" {
+		return nil
+	}
+	out := map[string]string{}
+	for sc.Scan() {
+		if sc.Text() == "---" {
+			return out
+		}
+		if k, v, ok := strings.Cut(sc.Text(), ":"); ok {
+			out[k] = strings.TrimSpace(v)
+		}
+	}
+	return nil
 }
 
 // transcript renders the conversation for the summarizer. Consecutive turns
@@ -280,8 +357,9 @@ func attrText(m map[string]any, keys ...string) string {
 	return ""
 }
 
-// writeCard writes or replaces the card.
-func writeCard(dir string, c card, summary string) error {
+// writeCard writes or replaces the card. by names the model that wrote the
+// summary, and is empty when the card carries the opening instead.
+func writeCard(dir string, c card, summary, by string) error {
 	stem, prefix := cardStem(c)
 	path := filepath.Join(dir, stem+".md")
 
@@ -298,7 +376,7 @@ func writeCard(dir string, c card, summary string) error {
 			}
 		}
 	}
-	return os.WriteFile(path, []byte(renderCard(c, summary)), 0o644)
+	return os.WriteFile(path, []byte(renderCard(c, summary, by)), 0o644)
 }
 
 // cardStem is the filename without extension, plus the stable prefix used to
@@ -353,8 +431,10 @@ func earliestTurn(c conversation) time.Time {
 
 // renderCard builds the markdown. The document ID is in the frontmatter and
 // the retrieval command is in the body, because the card's whole job is to be
-// readable on its own and to say how to get the rest.
-func renderCard(c card, summary string) string {
+// readable on its own and to say how to get the rest. The last two fields are
+// for the next import (see cardWriter.current): which model wrote the summary,
+// absent when there is none, and the digest of what the card describes.
+func renderCard(c card, summary, by string) string {
 	title := c.title
 	if title == "" {
 		title = "untitled"
@@ -385,6 +465,10 @@ func renderCard(c card, summary string) string {
 			fmt.Fprintf(&b, "%s: %s\n", k, v)
 		}
 	}
+	if by != "" {
+		fmt.Fprintf(&b, "summarizer: %s\n", yamlString(by))
+	}
+	fmt.Fprintf(&b, "digest: %s\n", c.digest())
 	b.WriteString("---\n\n")
 
 	fmt.Fprintf(&b, "# %s\n\n", title)

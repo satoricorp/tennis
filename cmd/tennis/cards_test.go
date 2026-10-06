@@ -31,7 +31,7 @@ func TestCardCarriesFrontmatterAndPointer(t *testing.T) {
 	dir := t.TempDir()
 	c := conv("Bug: retry loop never exits", user("why does this hang"), assistant("the backoff never resets"))
 
-	if err := writeCard(dir, c.card(), "The retry loop never exited because the backoff was not reset."); err != nil {
+	if err := writeCard(dir, c.card(), "The retry loop never exited because the backoff was not reset.", ""); err != nil {
 		t.Fatal(err)
 	}
 	entries, _ := os.ReadDir(dir)
@@ -63,11 +63,11 @@ func TestCardCarriesFrontmatterAndPointer(t *testing.T) {
 func TestCardSweepsStaleTitle(t *testing.T) {
 	dir := t.TempDir()
 	c := conv("Draft title", user("hello"))
-	if err := writeCard(dir, c.card(), "one"); err != nil {
+	if err := writeCard(dir, c.card(), "one", ""); err != nil {
 		t.Fatal(err)
 	}
 	c.title = "The eventual title"
-	if err := writeCard(dir, c.card(), "two"); err != nil {
+	if err := writeCard(dir, c.card(), "two", ""); err != nil {
 		t.Fatal(err)
 	}
 	entries, _ := os.ReadDir(dir)
@@ -89,7 +89,7 @@ func TestCardNonLatinTitle(t *testing.T) {
 	dir := t.TempDir()
 	c := conv("日本語のタイトル", user("hello"))
 	c.id = "abc123"
-	if err := writeCard(dir, c.card(), "s"); err != nil {
+	if err := writeCard(dir, c.card(), "s", ""); err != nil {
 		t.Fatal(err)
 	}
 	entries, _ := os.ReadDir(dir)
@@ -209,7 +209,7 @@ func TestFileCardFrontmatter(t *testing.T) {
 	dir := t.TempDir()
 	c := fileCard("/Users/joe/notes/budget.xlsx", "budget.xlsx", "## Budget\n\nRent\t1200",
 		time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC), 2048)
-	if err := writeCard(dir, c, "A monthly budget with rent and utilities."); err != nil {
+	if err := writeCard(dir, c, "A monthly budget with rent and utilities.", ""); err != nil {
 		t.Fatal(err)
 	}
 	entries, _ := os.ReadDir(dir)
@@ -310,6 +310,156 @@ func TestExcerptIsBounded(t *testing.T) {
 	}
 	if got := excerpt("one\ntwo"); strings.Contains(got, "…") {
 		t.Errorf("a short file was marked as cut:\n%s", got)
+	}
+}
+
+// addCards runs one source through the import the way `tennis add` does, with
+// sum writing the cards into dir, and returns the writer for its counts. Each
+// call is a fresh writer, as each add is a fresh process.
+func addCards(t *testing.T, src, format string, sum summarize.Summarizer, dir string) *cardWriter {
+	t.Helper()
+	w, err := newCardWriter(t.Context(), dir, sum)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sink := &docSink{capture: func(string, string, map[string]any) {}, cards: w}
+	if _, err := importPath(src, format, perTurn, defaultExt, sink, func(string) {}, true); err != nil {
+		t.Fatalf("importPath(%s): %v", src, err)
+	}
+	w.close()
+	return w
+}
+
+// TestReaddSummarizesOnlyWhatChanged: re-adding ~/.claude is hundreds of
+// sessions that have not changed, and with a key set every card written again
+// is a model call that says what the card already says. Only a changed file,
+// or a card that is no longer there, is worth one.
+func TestReaddSummarizesOnlyWhatChanged(t *testing.T) {
+	cards := t.TempDir()
+	notes := t.TempDir()
+	for name, body := range map[string]string{
+		"auth.md":   "# Session handling\nkeep the user signed in",
+		"budget.md": "rent 1200, utilities 140",
+	} {
+		if err := os.WriteFile(filepath.Join(notes, name), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	session := writeZip(t, "codex.zip", map[string]string{"sessions/rollout-S9.jsonl": codexSession})
+
+	add := func(src, format string) (*cardWriter, *recordingSummarizer) {
+		t.Helper()
+		rec := &recordingSummarizer{}
+		return addCards(t, src, format, rec, cards), rec
+	}
+
+	if w, rec := add(notes, formatFiles); len(rec.seen) != 2 || w.written != 2 {
+		t.Fatalf("first add: %d summaries, %d cards; want 2 and 2", len(rec.seen), w.written)
+	}
+	if w, rec := add(session, formatAuto); len(rec.seen) != 1 || w.written != 1 {
+		t.Fatalf("first add of a session: %d summaries, %d cards; want 1 and 1", len(rec.seen), w.written)
+	}
+
+	// The same files and the same session again: nothing to say.
+	if w, rec := add(notes, formatFiles); len(rec.seen) != 0 || w.written != 0 || w.unchanged != 2 {
+		t.Errorf("identical re-add: %d summaries, %d written, %d unchanged; want 0, 0, 2", len(rec.seen), w.written, w.unchanged)
+	}
+	if w, rec := add(session, formatAuto); len(rec.seen) != 0 || w.written != 0 || w.unchanged != 1 {
+		t.Errorf("identical session re-add: %d summaries, %d written, %d unchanged; want 0, 0, 1", len(rec.seen), w.written, w.unchanged)
+	}
+
+	// One file changes: one summary, of that file.
+	if err := os.WriteFile(filepath.Join(notes, "budget.md"), []byte("rent 1250, utilities 140"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	w, rec := add(notes, formatFiles)
+	if len(rec.seen) != 1 || w.written != 1 || w.unchanged != 1 {
+		t.Fatalf("re-add after one edit: %d summaries, %d written, %d unchanged; want 1, 1, 1", len(rec.seen), w.written, w.unchanged)
+	}
+	if !strings.Contains(rec.seen[0].Transcript, "rent 1250") {
+		t.Errorf("summarized the wrong file: %+v", rec.seen[0])
+	}
+
+	// A card the person deleted comes back, and one they wrote in is left
+	// alone while what it describes is unchanged.
+	auth := filepath.Join(cards, "auth-md-"+shortHash(filepath.Join(notes, "auth.md"))+".md")
+	budget := filepath.Join(cards, "budget-md-"+shortHash(filepath.Join(notes, "budget.md"))+".md")
+	if err := os.Remove(auth); err != nil {
+		t.Fatal(err)
+	}
+	body, err := os.ReadFile(budget)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(budget, append(body, "\nmy note: ask about the deposit\n"...), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if w, rec := add(notes, formatFiles); len(rec.seen) != 1 || w.written != 1 {
+		t.Errorf("re-add after deleting a card: %d summaries, %d written; want 1 and 1", len(rec.seen), w.written)
+	}
+	if _, err := os.Stat(auth); err != nil {
+		t.Errorf("the deleted card was not written again: %v", err)
+	}
+	if body, _ := os.ReadFile(budget); !strings.Contains(string(body), "ask about the deposit") {
+		t.Errorf("an unchanged file's card lost the person's note:\n%s", body)
+	}
+}
+
+// TestCardWriterRetriesWhatFellBack: a card that carries the opening because
+// there was no key, or because its summary failed, is summarized on the next
+// import that can — and a run with no key never trades a summary an earlier
+// run paid for back for the opening.
+func TestCardWriterRetriesWhatFellBack(t *testing.T) {
+	dir := t.TempDir()
+	c := conv("A chat", user("how do I rotate the signing key"), assistant("with kid headers"))
+	run := func(sum summarize.Summarizer) *cardWriter {
+		t.Helper()
+		w, err := newCardWriter(t.Context(), dir, sum)
+		if err != nil {
+			t.Fatal(err)
+		}
+		w.add(c.card())
+		w.close()
+		return w
+	}
+	read := func() string {
+		t.Helper()
+		entries, _ := os.ReadDir(dir)
+		if len(entries) != 1 {
+			t.Fatalf("found %d cards on disk, want 1", len(entries))
+		}
+		body, _ := os.ReadFile(filepath.Join(dir, entries[0].Name()))
+		return string(body)
+	}
+
+	run(nil)
+	if got := read(); strings.Contains(got, "summarizer:") {
+		t.Fatalf("a card with no summary claims a summarizer:\n%s", got)
+	}
+	if w := run(nil); w.written != 0 {
+		t.Errorf("with still no key, an unchanged card was written again")
+	}
+	if w := run(failingSummarizer{}); w.written != 1 || w.failed != 1 {
+		t.Errorf("a key appeared: %d written, %d failed; want the card tried (1, 1)", w.written, w.failed)
+	}
+
+	rec := &recordingSummarizer{}
+	if w := run(rec); len(rec.seen) != 1 || w.written != 1 {
+		t.Errorf("after a failed summary: %d summaries, %d written; want the card tried again (1, 1)", len(rec.seen), w.written)
+	}
+	got := read()
+	if !strings.Contains(got, "recorded") || !strings.Contains(got, `summarizer: "test:recording"`) {
+		t.Fatalf("the retried card does not carry its summary:\n%s", got)
+	}
+
+	if w := run(nil); w.written != 0 || w.unchanged != 1 {
+		t.Errorf("a run with no key rewrote a summarized card: %d written, %d unchanged", w.written, w.unchanged)
+	}
+	if w := run(&recordingSummarizer{}); w.written != 0 {
+		t.Errorf("a summarized, unchanged card was summarized again")
+	}
+	if !strings.Contains(read(), "recorded") {
+		t.Errorf("the summary did not survive:\n%s", read())
 	}
 }
 

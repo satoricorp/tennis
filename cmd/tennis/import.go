@@ -272,6 +272,7 @@ func runImport(nsName string, paths []string, o importOpts) error {
 		if sink.cards != nil {
 			out["cards"] = sink.cards.written
 			out["cards_unsummarized"] = sink.cards.failed
+			out["cards_unchanged"] = sink.cards.unchanged
 		}
 		if pathErr != nil {
 			// sources lists only what went in, so without this a reader of

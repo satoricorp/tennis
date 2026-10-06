@@ -150,7 +150,7 @@ tennis add --files ~/Documents/notes
 
 A `.zip`, an already-unzipped directory, and a single transcript are all acceptable. [Importing sessions](/importing) covers what Tennis reads out of each format and what it deliberately skips.
 
-Plain files are read by whatever reads their kind: text of any sort as it is; spreadsheets, Word, PowerPoint and HTML by tennis itself; PDFs with `pdftotext` when it is installed or, on a Mac, by Spotlight; RTF, Pages, Numbers, Keynote and the older Office formats through macOS. Photos, audio, video, archives and dotfiles are passed over. Every file and every conversation also gets a card, a markdown summary written to `~/tennis` and never read back.
+Plain files are read by whatever reads their kind: text of any sort as it is; spreadsheets, Word, PowerPoint and HTML by tennis itself; PDFs with `pdftotext` when it is installed or, on a Mac, by Spotlight; RTF, Pages, Numbers, Keynote and the older Office formats through macOS. Photos, audio, video, archives and dotfiles are passed over. Every file and every conversation also gets a card, a markdown summary written to `~/tennis` and never read back into the index. Adding the same source again rewrites only the cards whose file or conversation changed.
 
 ```bash
 tennis add ./src --files --ext .go,.ts,.rs    # only these extensions (default: everything with text)
