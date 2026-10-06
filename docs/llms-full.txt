@@ -646,12 +646,13 @@ Two things came out of that. The documents went into the database, which is what
 To see what landed without searching for it:
 
 ```bash
-$ tennis ls
+$ tennis ls -n 3
 DATE             SOURCE         DOCS  TITLE
-2026-08-03 04:30 claude-code       2  TOML config parser with defaults
-2026-08-01 05:01 claude-code       3  Flaky auth test: token refresh window
+2025-03-15 11:20 claude            2  Session cookie expiry
+2025-03-11 04:07 claude            4  Postgres connection pooling
+2025-02-27 13:40 claude            2  Trip planning: Lisbon
 
-2 sessions
+3 of 1214 sessions (--offset 3 for more, -n 0 for all)
 ```
 
 `ls` groups by session, newest first, with any files you have added listed among them by date; `tennis ls chatgpt` narrows to one source, and `--docs` lists documents instead. The [CLI](/cli#tennis-ls) page has every flag.
@@ -668,13 +669,14 @@ Whole threads are long, and a vector is the average of its tokens — see [why c
 
 ## Searching by attribute
 
-Every imported document carries the attributes needed to find its way home — `source`, `session`, `role`, `title`, `created`, and for local sessions `project`, `cwd`, and `branch`. They work on `search` and on `ls` alike:
+Every imported document carries the attributes needed to find its way home — `source`, `session`, `role`, `title`, `created`, and for local sessions `project`, `cwd`, and `branch`. `project` is the name of the repo a session ran in, taken from its working directory, for Claude Code and Codex alike. The desktop app runs most sessions in a worktree under `.claude/worktrees`, where the last element of the working directory is the worktree's name rather than the repo's, so a session there is filed under the repo it was cut from and the worktree's name is kept as `worktree`. The attributes work on `search` and on `ls` alike:
 
 ```bash
 tennis search "retry logic" --where role=user
 tennis search "flaky test" --where project=tennis,branch=main
 tennis search "the timeout" --where source=codex
 tennis ls --where branch=main
+tennis ls --where worktree=brave-turing-1a2b3c
 ```
 
 A card's last line is the filter that pulls up its whole conversation: `tennis search --where 'session=<id>'`. With a filter and no query, `search` prints every match in full and in order rather than ranking anything — see [Reading, not ranking](/cli#reading-not-ranking).
@@ -734,7 +736,7 @@ source: claude-code
 title: "Flaky auth test: token refresh window"
 created: 2026-08-01T10:00:00Z
 turns: 3
-project: -Users-you-git-app
+project: app
 cwd: /Users/you/git/app
 branch: main
 summarizer: "anthropic:claude-opus-5"
@@ -750,7 +752,7 @@ expired token. The window was widened and a regression test added.
 Full conversation: `tennis search --where 'session=7f3a2c10-1b2e-4d5f-9a8b-0c1d2e3f4a5b'`
 ```
 
-The frontmatter carries what the import knew: the document-id prefix as `session`, the `source`, the `title`, when it was `created`, how many `turns` it ran, and for local agent sessions the `project`, `cwd`, and `branch` when the transcript recorded them. `summarizer` names the model that wrote the prose, and is absent when the card carries the opening message instead. `digest` is how the next `add` tells whether the card needs writing again — see [Adding again](#adding-again). The last line is how to get the rest: run it and `search` prints the whole conversation, turn by turn (see [Reading, not ranking](/cli#reading-not-ranking)). The card's whole job is to be readable on its own and to say where the full record lives.
+The frontmatter carries what the import knew: the document-id prefix as `session`, the `source`, the `title`, when it was `created`, how many `turns` it ran, and for local agent sessions the `project`, `cwd`, and `branch` when the transcript recorded them. `project` is the name of the repo the session ran in; a session run in a `.claude/worktrees` checkout is filed under the repo it was cut from, and its card carries the worktree's name as `worktree`, between `project` and `cwd`. `summarizer` names the model that wrote the prose, and is absent when the card carries the opening message instead. `digest` is how the next `add` tells whether the card needs writing again — see [Adding again](#adding-again). The last line is how to get the rest: run it and `search` prints the whole conversation, turn by turn (see [Reading, not ranking](/cli#reading-not-ranking)). The card's whole job is to be readable on its own and to say where the full record lives.
 
 The filename is the UTC timestamp, the source, and a slug of the title: `2026-08-01-100000-claude-code-flaky-auth-test-token-refresh-window.md`. Claude Code names a session several turns in, so importing twice can produce two titles for one conversation; the timestamp-and-source prefix is stable, and a re-import replaces the older card rather than leaving both.
 

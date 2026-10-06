@@ -33,7 +33,7 @@ source: claude-code
 title: "Flaky auth test: token refresh window"
 created: 2026-08-01T10:00:00Z
 turns: 3
-project: -Users-you-git-app
+project: app
 cwd: /Users/you/git/app
 branch: main
 summarizer: "anthropic:claude-opus-5"
@@ -49,7 +49,7 @@ expired token. The window was widened and a regression test added.
 Full conversation: `tennis search --where 'session=7f3a2c10-1b2e-4d5f-9a8b-0c1d2e3f4a5b'`
 ```
 
-The frontmatter carries what the import knew: the document-id prefix as `session`, the `source`, the `title`, when it was `created`, how many `turns` it ran, and for local agent sessions the `project`, `cwd`, and `branch` when the transcript recorded them. `summarizer` names the model that wrote the prose, and is absent when the card carries the opening message instead. `digest` is how the next `add` tells whether the card needs writing again — see [Adding again](#adding-again). The last line is how to get the rest: run it and `search` prints the whole conversation, turn by turn (see [Reading, not ranking](/cli#reading-not-ranking)). The card's whole job is to be readable on its own and to say where the full record lives.
+The frontmatter carries what the import knew: the document-id prefix as `session`, the `source`, the `title`, when it was `created`, how many `turns` it ran, and for local agent sessions the `project`, `cwd`, and `branch` when the transcript recorded them. `project` is the name of the repo the session ran in; a session run in a `.claude/worktrees` checkout is filed under the repo it was cut from, and its card carries the worktree's name as `worktree`, between `project` and `cwd`. `summarizer` names the model that wrote the prose, and is absent when the card carries the opening message instead. `digest` is how the next `add` tells whether the card needs writing again — see [Adding again](#adding-again). The last line is how to get the rest: run it and `search` prints the whole conversation, turn by turn (see [Reading, not ranking](/cli#reading-not-ranking)). The card's whole job is to be readable on its own and to say where the full record lives.
 
 The filename is the UTC timestamp, the source, and a slug of the title: `2026-08-01-100000-claude-code-flaky-auth-test-token-refresh-window.md`. Claude Code names a session several turns in, so importing twice can produce two titles for one conversation; the timestamp-and-source prefix is stable, and a re-import replaces the older card rather than leaving both.
 

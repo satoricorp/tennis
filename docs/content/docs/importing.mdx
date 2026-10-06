@@ -53,12 +53,13 @@ Two things came out of that. The documents went into the database, which is what
 To see what landed without searching for it:
 
 ```bash
-$ tennis ls
+$ tennis ls -n 3
 DATE             SOURCE         DOCS  TITLE
-2026-08-03 04:30 claude-code       2  TOML config parser with defaults
-2026-08-01 05:01 claude-code       3  Flaky auth test: token refresh window
+2025-03-15 11:20 claude            2  Session cookie expiry
+2025-03-11 04:07 claude            4  Postgres connection pooling
+2025-02-27 13:40 claude            2  Trip planning: Lisbon
 
-2 sessions
+3 of 1214 sessions (--offset 3 for more, -n 0 for all)
 ```
 
 `ls` groups by session, newest first, with any files you have added listed among them by date; `tennis ls chatgpt` narrows to one source, and `--docs` lists documents instead. The [CLI](/cli#tennis-ls) page has every flag.
@@ -75,13 +76,14 @@ Whole threads are long, and a vector is the average of its tokens — see [why c
 
 ## Searching by attribute
 
-Every imported document carries the attributes needed to find its way home — `source`, `session`, `role`, `title`, `created`, and for local sessions `project`, `cwd`, and `branch`. They work on `search` and on `ls` alike:
+Every imported document carries the attributes needed to find its way home — `source`, `session`, `role`, `title`, `created`, and for local sessions `project`, `cwd`, and `branch`. `project` is the name of the repo a session ran in, taken from its working directory, for Claude Code and Codex alike. The desktop app runs most sessions in a worktree under `.claude/worktrees`, where the last element of the working directory is the worktree's name rather than the repo's, so a session there is filed under the repo it was cut from and the worktree's name is kept as `worktree`. The attributes work on `search` and on `ls` alike:
 
 ```bash
 tennis search "retry logic" --where role=user
 tennis search "flaky test" --where project=tennis,branch=main
 tennis search "the timeout" --where source=codex
 tennis ls --where branch=main
+tennis ls --where worktree=brave-turing-1a2b3c
 ```
 
 A card's last line is the filter that pulls up its whole conversation: `tennis search --where 'session=<id>'`. With a filter and no query, `search` prints every match in full and in order rather than ranking anything — see [Reading, not ranking](/cli#reading-not-ranking).
