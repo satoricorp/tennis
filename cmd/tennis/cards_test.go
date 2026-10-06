@@ -3,8 +3,11 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"testing"
@@ -481,4 +484,102 @@ type failingSummarizer struct{}
 func (failingSummarizer) Provider() string { return "test:always-fails" }
 func (failingSummarizer) Summarize(_ context.Context, _ summarize.Input) (string, error) {
 	return "", errors.New("rate limited")
+}
+
+// TestCardPointerRuns: the last line of every card is a command, and it has to
+// work. It is taken off real cards from a real import, split into words by sh
+// exactly as a person pasting it would have it split, and run with nothing
+// added — the database comes from $TENNIS_DB, so not even a flag. A nil error
+// is what makes main exit 0.
+//
+// What it prints has to be the rest of the record, not a ranked fragment of
+// it: the whole conversation, every turn in the order it was said, and the
+// whole file, which here is long enough to be several chunks and too long for
+// its card to carry.
+func TestCardPointerRuns(t *testing.T) {
+	cache := ndjsonTestCache(t)
+	t.Setenv("TENNIS_CACHE", cache)
+	t.Setenv("TENNIS_NS", "")
+	t.Setenv("ANTHROPIC_API_KEY", "")
+	t.Setenv("OPENAI_API_KEY", "")
+	cardDir := t.TempDir()
+	t.Setenv("TENNIS_CARDS", cardDir)
+	t.Setenv("TENNIS_DB", filepath.Join(t.TempDir(), "cards.sqlite"))
+
+	var note strings.Builder
+	note.WriteString("# Tulum trip\n\n")
+	for i := 1; i <= 40; i++ {
+		fmt.Fprintf(&note, "Day %d: walked to the cenote, then lunch near Hotel Esencia.\n", i)
+	}
+	notes := t.TempDir()
+	// A space in the name, so the quoting on the card is part of what is tested.
+	if err := os.WriteFile(filepath.Join(notes, "trip notes.md"), []byte(note.String()), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	session := writeZip(t, "sessions.zip", map[string]string{
+		"projects/-Users-joe-git-tennis/S1.jsonl": claudeCodeSession,
+	})
+	for _, args := range [][]string{{"--claude-code", session}, {"--files", notes}} {
+		if _, err := captureStderr(t, func() error {
+			_, err := captureStdout(t, func() error { return cmdAdd(args) })
+			return err
+		}); err != nil {
+			t.Fatalf("add %v: %v", args, err)
+		}
+	}
+
+	entries, err := os.ReadDir(cardDir)
+	if err != nil || len(entries) != 2 {
+		t.Fatalf("want a card for the session and one for the file, got %v (%v)", entries, err)
+	}
+	pointer := regexp.MustCompile("`(tennis [^`]+)`\\s*$")
+	for _, e := range entries {
+		body, err := os.ReadFile(filepath.Join(cardDir, e.Name()))
+		if err != nil {
+			t.Fatal(err)
+		}
+		m := pointer.FindStringSubmatch(string(body))
+		if m == nil {
+			t.Errorf("%s does not end in a command:\n%s", e.Name(), body)
+			continue
+		}
+		words, err := exec.Command("sh", "-c", `printf '%s\0' `+m[1]).Output()
+		if err != nil {
+			t.Fatalf("sh could not split %q: %v", m[1], err)
+		}
+		argv := strings.Split(strings.TrimSuffix(string(words), "\x00"), "\x00")
+		if len(argv) < 2 || argv[0] != "tennis" || argv[1] != "search" {
+			t.Fatalf("%s points at %q, which this test does not know how to run", e.Name(), m[1])
+		}
+		out, err := captureStdout(t, func() error { return cmdSearch(argv[2:]) })
+		if err != nil {
+			t.Errorf("%s: `%s` failed: %v", e.Name(), m[1], err)
+			continue
+		}
+
+		if strings.Contains(string(body), "\nsource: file\n") {
+			if strings.TrimSpace(out) != strings.TrimSpace(note.String()) {
+				t.Errorf("`%s` did not print the file as it was:\n%s", m[1], out)
+			}
+			continue
+		}
+		// The title, then every turn in index order. The documents' IDs sort
+		// differently (claude-code:S1:a1 before :u1), so ID order would fail.
+		want := []string{
+			"# Fixing the flaky auth test",
+			"## summary\n\nFixing the flaky auth test",
+			"## user\n\nthe auth test is flaky",
+			"## assistant\n\nlook at the token refresh window",
+			"## assistant/subagent\n\nsubagent found the race in the clock",
+		}
+		at := 0
+		for _, w := range want {
+			i := strings.Index(out[at:], w)
+			if i < 0 {
+				t.Errorf("`%s` is missing %q after byte %d:\n%s", m[1], w, at, out)
+				break
+			}
+			at += i + len(w)
+		}
+	}
 }

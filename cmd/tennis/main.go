@@ -18,6 +18,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime/debug"
+	"sort"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -449,8 +450,12 @@ func cmdSearch(args []string) error {
 	if err != nil {
 		return err
 	}
+	o.capped = flagGiven(fs_, "k", "n")
 	if len(pos) < 1 {
-		return fmt.Errorf("usage: tennis search <query>")
+		if strings.TrimSpace(o.where) != "" {
+			return runRead(resolveNS(*nsName), o)
+		}
+		return fmt.Errorf("usage: tennis search <query>, or tennis search --where <filter> to read every match in full")
 	}
 	return runSearch(resolveNS(*nsName), strings.Join(pos, " "), o)
 }
@@ -464,6 +469,10 @@ func cmdMatch(args []string) error {
 	if err != nil {
 		return err
 	}
+	o.capped = flagGiven(fs_, "k", "n")
+	if len(pos) == 1 && strings.TrimSpace(o.where) != "" {
+		return runRead(pos[0], o)
+	}
 	if len(pos) < 2 {
 		return fmt.Errorf("usage: tennis match <namespace> <query>")
 	}
@@ -474,8 +483,23 @@ type searchOpts struct {
 	dbPath string
 	asJSON bool
 	topK   int
+	capped bool // -k or -n was given, rather than defaulted
 	mode   string
 	where  string
+}
+
+// flagGiven reports whether any of the named flags was set on the command
+// line, as opposed to holding its default.
+func flagGiven(fs_ *flag.FlagSet, names ...string) bool {
+	given := false
+	fs_.Visit(func(f *flag.Flag) {
+		for _, n := range names {
+			if f.Name == n {
+				given = true
+			}
+		}
+	})
+	return given
 }
 
 func registerSearchFlags(fs_ *flag.FlagSet, o *searchOpts) {
@@ -488,7 +512,7 @@ func registerSearchFlags(fs_ *flag.FlagSet, o *searchOpts) {
 	fs_.IntVar(&o.topK, "k", 1, "how many results")
 	fs_.IntVar(&o.topK, "n", 1, "how many results (alias for -k)")
 	fs_.StringVar(&o.mode, "mode", "hybrid", "hybrid | keyword | semantic")
-	fs_.StringVar(&o.where, "where", "", "attribute filter, e.g. status=merged (repeat with commas)")
+	fs_.StringVar(&o.where, "where", "", "attribute filter, e.g. status=merged (repeat with commas); with no query, prints every match in full")
 }
 
 func runSearch(nsName, query string, o searchOpts) error {
@@ -524,6 +548,99 @@ func runSearch(nsName, query string, o searchOpts) error {
 
 	renderResults(os.Stdout, results, textWidth(), newStyler(os.Stdout))
 	return nil
+}
+
+// runRead is search with nothing to rank: every document the filter matches,
+// whole and in order. It is what the last line of a card runs.
+//
+// Ranking is the wrong answer to "show me the rest". A conversation imported a
+// turn at a time is one document per message, and the best-matching one of
+// those is a fragment; the record a card points at is all of them, in the
+// order they were said. So a filter with no query lists rather than ranks,
+// and -k applies only when asked for — its default of one exists to make a
+// ranked answer short, which is not the point here.
+func runRead(nsName string, o searchOpts) error {
+	db, err := open(o.dbPath, o.asJSON)
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+	ctx := context.Background()
+
+	ns, err := db.Namespace(ctx, nsName)
+	if err != nil {
+		return err
+	}
+	filter, err := parseWhere(o.where)
+	if err != nil {
+		return err
+	}
+
+	// List orders by one attribute, so turns come back by index across every
+	// session that matched. The stable sort by session afterwards gathers each
+	// conversation back together without disturbing its order. Files carry no
+	// session and so come first; anything in a session with no index — a
+	// conversation imported whole — follows that session's turns.
+	infos, err := ns.List(ctx, tennis.ListOptions{Filter: filter, Limit: -1, SortBy: "index", Asc: true})
+	if err != nil {
+		return err
+	}
+	sort.SliceStable(infos, func(i, j int) bool {
+		return attrString(infos[i].Attributes, "session") < attrString(infos[j].Attributes, "session")
+	})
+	if o.capped && o.topK >= 0 && len(infos) > o.topK {
+		infos = infos[:o.topK]
+	}
+
+	// Text is read one document at a time, by ID, because List deliberately
+	// never carries it.
+	docs := make([]tennis.Document, 0, len(infos))
+	for _, info := range infos {
+		d, err := ns.Get(ctx, info.ID)
+		if err != nil {
+			return err
+		}
+		docs = append(docs, *d)
+	}
+	if o.asJSON {
+		return emit(docs)
+	}
+	if len(docs) == 0 {
+		fmt.Println("no matches")
+		return nil
+	}
+	fmt.Print(renderDocs(docs))
+	return nil
+}
+
+// renderDocs writes documents out in full. A conversation's turns become one
+// transcript under its title — the rendering the summarizer read, so a card
+// and the record behind it read alike. Anything without a speaker, a file
+// above all, is its text exactly as it was indexed.
+func renderDocs(docs []tennis.Document) string {
+	var blocks []string
+	for i := 0; i < len(docs); {
+		first := docs[i].Attributes
+		if attrString(first, "role") == "" {
+			blocks = append(blocks, strings.TrimRight(docs[i].Text, "\n"))
+			i++
+			continue
+		}
+		var c conversation
+		for ; i < len(docs); i++ {
+			a := docs[i].Attributes
+			if attrString(a, "role") == "" || attrString(a, "session") != attrString(first, "session") {
+				break
+			}
+			c.turns = append(c.turns, turn{role: attrString(a, "role"), text: docs[i].Text})
+		}
+		block := c.transcript()
+		if t := attrString(first, "title"); t != "" {
+			block = "# " + t + "\n\n" + block
+		}
+		blocks = append(blocks, block)
+	}
+	return strings.Join(blocks, "\n\n") + "\n"
 }
 
 // renderResults writes the human-readable form of a result set. The styling

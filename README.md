@@ -159,6 +159,8 @@ Photos, audio, video, and archives are passed over without comment, as are dotfi
 
 Every conversation and every file also gets a card: a markdown summary in `~/tennis` (`--cards <dir>`, or `$TENNIS_CARDS`), with prose from `ANTHROPIC_API_KEY` or `OPENAI_API_KEY` when one is set and the opening of the thread or file when not. A file's card is named after the file, so re-adding a folder updates its cards in place. Cards are never read back into the index, so they are safe to edit, move, or delete. Adding a source again leaves a card alone unless what it describes changed, the card is gone, or it carries the opening and a key is now set, so a re-add makes no model calls for what is already summarized; `--no-cards` skips them.
 
+A card ends with the command that prints the rest: `tennis search --where 'session=<id>'` for a conversation, `tennis search --where 'path=<file>'` for a file. Given a filter and no query, `search` prints every match in full and in order, without ranking anything.
+
 Two things are deliberately left out of session imports. Local transcripts are indexed from their text and thinking, not their tool calls and tool results — those are mostly whole file reads and command output, and letting them in would mean every search ranked file contents above what was said about them. A Codex rollout records each exchange twice, once as raw model traffic carrying the harness preamble and once as the events the interface showed; tennis reads the second, because what you remember saying is what you typed. ChatGPT messages the exporter marked as hidden are skipped for the same reason: they were never on screen.
 
 ### `add --ndjson` — ingest documents that aren't files
