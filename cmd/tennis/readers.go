@@ -176,7 +176,7 @@ func fileText(f fileEntry) (string, error) {
 	case text == "":
 		return "", errors.New("no text in it")
 	case len(text) > maxSeedFileSize:
-		return "", fmt.Errorf("its text is more than the %dMB cap", maxSeedFileSize/(1<<20))
+		return "", errTextCap
 	}
 	return text, nil
 }
@@ -231,24 +231,85 @@ func fromBody(read func([]byte) (string, error)) func(fileEntry) (string, error)
 	}
 }
 
-// tidy settles extracted text into lines: runs of spaces collapsed, runs of
-// blank lines reduced to one, nothing else touched.
-func tidy(s string) string {
-	var out []string
-	blank := false
-	for _, line := range strings.Split(s, "\n") {
-		line = strings.Join(strings.Fields(line), " ")
-		if line == "" {
-			if !blank && len(out) > 0 {
-				out = append(out, "")
-			}
-			blank = true
-			continue
-		}
-		out = append(out, line)
-		blank = false
+// errTextCap is a document whose text is past maxSeedFileSize. fileText
+// refuses such a text, and a reader that builds one returns this the moment
+// it passes the cap rather than build the rest only to have it refused.
+var errTextCap = fmt.Errorf("its text is more than the %dMB cap", maxSeedFileSize/(1<<20))
+
+// errUnpackCap is a zip whose members unpack to more than maxDocumentSize.
+var errUnpackCap = fmt.Errorf("it unpacks to more than the %dMB cap", maxDocumentSize/(1<<20))
+
+// overCap reports an error that is one of the caps rather than a fault in
+// the file, which a reader passes on as it is, not under the name of the
+// part that tipped it over.
+func overCap(err error) bool {
+	return errors.Is(err, errTextCap) || errors.Is(err, errUnpackCap)
+}
+
+// unpacking is what one zip's members may still unpack to. Deflate turns a
+// kilobyte of repetition into a megabyte, so the cap on the file is no cap on
+// what it holds: a 300KB Word file can unpack to gigabytes. Every member a
+// reader opens is read against one budget, unpackCap, the same cap the file
+// was held to, and a member that would take it past fails with errUnpackCap.
+type unpacking struct{ left int64 }
+
+// unpackCap is maxDocumentSize, as a variable so a test can lower it.
+var unpackCap int64 = maxDocumentSize
+
+func newUnpacking() *unpacking { return &unpacking{left: unpackCap} }
+
+func (u *unpacking) open(f *zip.File) (io.ReadCloser, error) {
+	rc, err := f.Open()
+	if err != nil {
+		return nil, err
 	}
-	return strings.TrimSpace(strings.Join(out, "\n"))
+	return &unpackReader{rc, u}, nil
+}
+
+type unpackReader struct {
+	io.ReadCloser
+	u *unpacking
+}
+
+func (r *unpackReader) Read(p []byte) (int, error) {
+	if r.u.left < 0 {
+		return 0, errUnpackCap
+	}
+	if int64(len(p)) > r.u.left+1 {
+		p = p[:r.u.left+1]
+	}
+	n, err := r.ReadCloser.Read(p)
+	if r.u.left -= int64(n); r.u.left < 0 {
+		return 0, errUnpackCap
+	}
+	return n, err
+}
+
+// tidy settles extracted text into lines: runs of spaces collapsed, runs of
+// blank lines reduced to one, nothing else touched. It walks the text in
+// place, since the text can be at the cap and a slice of its lines several
+// times that.
+func tidy(s string) string {
+	var b strings.Builder
+	b.Grow(len(s))
+	blank := false // a blank line came since the last line written
+	for line := range strings.Lines(s) {
+		empty := true
+		for word := range strings.FieldsSeq(line) {
+			switch {
+			case !empty:
+				b.WriteByte(' ')
+			case b.Len() > 0 && blank:
+				b.WriteString("\n\n")
+			case b.Len() > 0:
+				b.WriteByte('\n')
+			}
+			b.WriteString(word)
+			empty = false
+		}
+		blank = empty
+	}
+	return b.String()
 }
 
 // --- HTML -------------------------------------------------------------------
@@ -295,12 +356,13 @@ func epubText(body []byte) (string, error) {
 	for _, f := range zr.File {
 		parts[f.Name] = f
 	}
+	unpacked := newUnpacking()
 	open := func(name string) (io.ReadCloser, error) {
 		f := parts[name]
 		if f == nil {
 			return nil, fmt.Errorf("no %s in the book", name)
 		}
-		return f.Open()
+		return unpacked.open(f)
 	}
 
 	var container struct {
@@ -341,9 +403,10 @@ func epubText(body []byte) (string, error) {
 	}
 
 	// Pages compress well, so the cap on the zip is no cap on what they
-	// expand to; the pages together are held to the same cap the file was.
+	// expand to; open holds them to the cap the file was, and their text is
+	// held to the text cap as it comes.
 	var pages []string
-	left := int64(maxDocumentSize)
+	size := 0
 	for _, ref := range pkg.Spine {
 		name := hrefs[ref.IDRef]
 		switch {
@@ -356,21 +419,25 @@ func epubText(body []byte) (string, error) {
 		if err != nil {
 			return "", err
 		}
-		page, err := io.ReadAll(io.LimitReader(rc, left+1))
+		page, err := io.ReadAll(rc)
 		rc.Close()
-		if err != nil {
+		switch {
+		case overCap(err):
+			return "", err
+		case err != nil:
 			return "", fmt.Errorf("%s: %w", name, err)
-		}
-		if left -= int64(len(page)); left < 0 {
-			return "", fmt.Errorf("its pages come to more than the %dMB cap", maxDocumentSize/(1<<20))
 		}
 		text, err := htmlText(epubHead.ReplaceAll(page, nil))
 		if err != nil {
 			return "", fmt.Errorf("%s: %w", name, err)
 		}
-		if text != "" {
-			pages = append(pages, text)
+		if text == "" {
+			continue
 		}
+		if size += len(text); size > maxSeedFileSize {
+			return "", errTextCap
+		}
+		pages = append(pages, text)
 	}
 	return strings.Join(pages, "\n\n"), nil
 }
@@ -397,10 +464,19 @@ func tool(name string) string {
 	return p
 }
 
+// toolWaitDelay is how long a conversion waits, once the converter has
+// exited or been killed, for whatever it started that still holds its
+// output open. Without it, a converter that forks a helper would hold the
+// import past toolTimeout for as long as the helper ran.
+var toolWaitDelay = 5 * time.Second
+
 // run executes a converter on the file and returns what it printed, stdout
 // and stderr apart. An entry inside a zip is written out first, since a
-// converter wants a path.
-func run(f fileEntry, args func(path string) []string) (stdout, stderr string, err error) {
+// converter wants a path. Stdout is held to limit bytes: a converter that
+// prints more is stopped, and the file is refused with errTextCap. Stderr
+// keeps its first limit bytes and drops the rest, since it is a converter's
+// complaints, read for their first line.
+func run(f fileEntry, limit int, args func(path string) []string) (stdout, stderr string, err error) {
 	p := f.path
 	if p == "" {
 		tmp, err := os.CreateTemp("", "tennis-*"+filepath.Ext(f.name))
@@ -413,11 +489,14 @@ func run(f fileEntry, args func(path string) []string) (stdout, stderr string, e
 			tmp.Close()
 			return "", "", err
 		}
-		_, err = io.Copy(tmp, io.LimitReader(rc, maxDocumentSize+1))
+		n, err := io.Copy(tmp, io.LimitReader(rc, maxDocumentSize+1))
 		rc.Close()
 		tmp.Close()
 		if err != nil {
 			return "", "", err
+		}
+		if n > maxDocumentSize {
+			return "", "", fmt.Errorf("larger than the %dMB cap, whatever its header says", maxDocumentSize/(1<<20))
 		}
 		p = tmp.Name()
 	}
@@ -426,16 +505,49 @@ func run(f fileEntry, args func(path string) []string) (stdout, stderr string, e
 	defer cancel()
 	argv := args(p)
 	cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)
-	var out, errs bytes.Buffer
-	cmd.Stdout, cmd.Stderr = &out, &errs
-	if err := cmd.Run(); err != nil {
-		msg := strings.TrimSpace(errs.String())
+	cmd.WaitDelay = toolWaitDelay
+	out := &heldTo{limit: limit, stop: cancel}
+	errs := &heldTo{limit: limit}
+	cmd.Stdout, cmd.Stderr = out, errs
+	err = cmd.Run()
+	switch {
+	case out.over:
+		return "", "", errTextCap
+	case errors.Is(err, exec.ErrWaitDelay):
+		// The converter exited cleanly and said what it had to; only
+		// something it left running still held the pipe.
+	case err != nil:
+		msg := strings.TrimSpace(errs.buf.String())
 		if msg == "" {
 			msg = err.Error()
 		}
 		return "", "", fmt.Errorf("%s: %s", filepath.Base(argv[0]), firstLine(msg, 120))
 	}
-	return out.String(), errs.String(), nil
+	return out.buf.String(), errs.buf.String(), nil
+}
+
+// heldTo collects what a converter prints, up to limit bytes. Past that it
+// either stops the converter — failing the write, which closes the pipe, and
+// calling stop — or, with no stop, keeps quiet and drops the rest.
+type heldTo struct {
+	buf   bytes.Buffer
+	limit int
+	stop  func()
+	over  bool
+}
+
+func (h *heldTo) Write(p []byte) (int, error) {
+	room := h.limit - h.buf.Len()
+	if len(p) <= room {
+		return h.buf.Write(p)
+	}
+	h.over = true
+	if h.stop != nil {
+		h.stop()
+		return 0, errTextCap
+	}
+	h.buf.Write(p[:max(room, 0)])
+	return len(p), nil
 }
 
 // readPDF prefers pdftotext, which is on most machines that have ever
@@ -444,7 +556,7 @@ func run(f fileEntry, args func(path string) []string) (stdout, stderr string, e
 func readPDF(f fileEntry) (string, error) {
 	switch {
 	case tool("pdftotext") != "":
-		out, _, err := run(f, func(p string) []string { return []string{"pdftotext", "-enc", "UTF-8", p, "-"} })
+		out, _, err := run(f, maxSeedFileSize, func(p string) []string { return []string{"pdftotext", "-enc", "UTF-8", p, "-"} })
 		if err != nil {
 			return "", err
 		}
@@ -461,7 +573,7 @@ func readWithTextutil(f fileEntry) (string, error) {
 	if runtime.GOOS != "darwin" {
 		return "", unavailable{"this format is read with macOS textutil"}
 	}
-	out, _, err := run(f, func(p string) []string { return []string{"textutil", "-convert", "txt", "-stdout", p} })
+	out, _, err := run(f, maxSeedFileSize, func(p string) []string { return []string{"textutil", "-convert", "txt", "-stdout", p} })
 	if err != nil {
 		return "", err
 	}
@@ -476,7 +588,10 @@ func readWithSpotlight(f fileEntry) (string, error) {
 	if runtime.GOOS != "darwin" {
 		return "", unavailable{"this format is read with macOS Spotlight"}
 	}
-	out, errs, err := run(f, func(p string) []string { return []string{"mdimport", "-t", "-d3", p} })
+	// The dump spells every character past ASCII as \Uxxxx, so a text at
+	// the cap can print at three times its size, with the other attributes
+	// on top.
+	out, errs, err := run(f, 3*maxSeedFileSize+(1<<20), func(p string) []string { return []string{"mdimport", "-t", "-d3", p} })
 	if err != nil {
 		return "", err
 	}

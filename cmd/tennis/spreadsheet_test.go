@@ -3,6 +3,8 @@ package main
 import (
 	"archive/zip"
 	"bytes"
+	"fmt"
+	"io"
 	"strings"
 	"testing"
 )
@@ -120,7 +122,10 @@ func TestXLSXTextRefusesWhatIsNotAWorkbook(t *testing.T) {
 }
 
 func TestColumnIndex(t *testing.T) {
-	for ref, want := range map[string]int{"A1": 0, "C7": 2, "Z1": 25, "AA1": 26, "AB12": 27, "": -1, "7": -1} {
+	for ref, want := range map[string]int{
+		"A1": 0, "C7": 2, "Z1": 25, "AA1": 26, "AB12": 27, "": -1, "7": -1,
+		"XFD1": 16383, "XFE1": 16383, "ZZZZZ1": 16383, "ZZZZZZZZZZZZZZZZZZZZ1": 16383,
+	} {
 		if got := columnIndex(ref); got != want {
 			t.Errorf("columnIndex(%q) = %d, want %d", ref, got, want)
 		}
@@ -150,5 +155,67 @@ func TestDateFormats(t *testing.T) {
 	}
 	if got := excelDate("0", true); got != "1904-01-01" {
 		t.Errorf("1904 epoch: excelDate(0) = %q", got)
+	}
+}
+
+// workbookOf is a one-sheet workbook around sheetData rows, with a shared
+// string table when sst is not empty.
+func workbookOf(t *testing.T, sst string, rows func(io.Writer)) []byte {
+	t.Helper()
+	parts := map[string]func(io.Writer){
+		"xl/workbook.xml": repeat(`<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="S" sheetId="1" r:id="rId1"/></sheets></workbook>`, "", "", 0),
+		"xl/_rels/workbook.xml.rels": repeat(`<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">`+
+			`<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/>`+
+			`<Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/sharedStrings" Target="sharedStrings.xml"/>`+
+			`</Relationships>`, "", "", 0),
+		"xl/worksheets/sheet1.xml": func(w io.Writer) {
+			io.WriteString(w, `<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData>`)
+			rows(w)
+			io.WriteString(w, `</sheetData></worksheet>`)
+		},
+	}
+	if sst != "" {
+		parts["xl/sharedStrings.xml"] = repeat(`<sst xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">`+sst+`</sst>`, "", "", 0)
+	}
+	return bomb(t, parts)
+}
+
+// TestXLSXStopsAtTheCap: the text a workbook comes to is counted as it is
+// built, wherever it comes from — one shared string held by every cell, a
+// shared string table past the cap, or the tabs that place a cell in its
+// column — and a cell reference past XFD is read as XFD rather than as a
+// row of millions of empty cells.
+func TestXLSXStopsAtTheCap(t *testing.T) {
+	megabyte := strings.Repeat("x", 1<<20)
+	fanOut := workbookOf(t, `<si><t>`+megabyte+`</t></si>`, func(w io.Writer) {
+		for r := 1; r <= 300; r++ {
+			fmt.Fprintf(w, `<row r="%d"><c r="A%d" t="s"><v>0</v></c></row>`, r, r)
+		}
+	})
+	readsWithin(t, "fan-out.xlsx", xlsxText, fanOut, errTextCap, allocBound)
+
+	var table strings.Builder
+	for i := range 12 {
+		table.WriteString(`<si><t>` + strings.Repeat(string(rune('a'+i)), 1<<20) + `</t></si>`)
+	}
+	readsWithin(t, "strings.xlsx", xlsxText, workbookOf(t, table.String(), func(w io.Writer) {
+		io.WriteString(w, `<row r="1"><c r="A1" t="s"><v>0</v></c></row>`)
+	}), errTextCap, allocBound)
+
+	padded := workbookOf(t, "", func(w io.Writer) {
+		for r := 1; r <= 1000; r++ {
+			fmt.Fprintf(w, `<row r="%d"><c r="A%d"><v>1</v></c><c r="XFD%d"><v>2</v></c></row>`, r, r, r)
+		}
+	})
+	readsWithin(t, "padded.xlsx", xlsxText, padded, errTextCap, allocBound)
+
+	far := workbookOf(t, "", func(w io.Writer) {
+		io.WriteString(w, `<row r="1"><c r="A1" t="inlineStr"><is><t>near</t></is></c><c r="ZZZZZ1" t="inlineStr"><is><t>far</t></is></c></row>`)
+		io.WriteString(w, `<row r="2"><c r="ZZZZZZZ2" t="inlineStr"><is><t>farther</t></is></c></row>`)
+	})
+	got := readsWithin(t, "far.xlsx", xlsxText, far, nil, 1<<20)
+	tabs := strings.Repeat("\t", 16383)
+	if want := "## S\n\nnear" + tabs + "far\n" + tabs + "farther"; got != want {
+		t.Errorf("cells past XFD: got %d bytes, want %d", len(got), len(want))
 	}
 }

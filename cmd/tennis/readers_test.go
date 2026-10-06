@@ -13,6 +13,7 @@ import (
 	"strings"
 	"testing"
 	"testing/fstest"
+	"time"
 )
 
 // entry is a fileEntry over bytes in memory, the shape a zip member has.
@@ -445,5 +446,29 @@ func TestGitignoreAgreesWithGit(t *testing.T) {
 	}
 	for p := range byGit {
 		t.Errorf("%q: git ignores a file the walk never saw", p)
+	}
+}
+
+// TestRunHoldsAConverterToTheCap: a converter that prints more than its
+// limit is stopped and the file refused, and one that exits leaving a child
+// holding its output open is not waited on past toolWaitDelay.
+func TestRunHoldsAConverterToTheCap(t *testing.T) {
+	f := onDisk(t, "a.txt", []byte("x"))
+	if _, _, err := run(f, 1<<20, func(string) []string { return []string{"yes"} }); !errors.Is(err, errTextCap) {
+		t.Errorf("a converter that never stops printing: got %v, want %v", err, errTextCap)
+	}
+	if out, _, err := run(f, 1<<20, func(string) []string { return []string{"echo", "within"} }); err != nil || out != "within\n" {
+		t.Errorf("a converter within its limit: %q, %v", out, err)
+	}
+
+	defer func(was time.Duration) { toolWaitDelay = was }(toolWaitDelay)
+	toolWaitDelay = 100 * time.Millisecond
+	start := time.Now()
+	out, _, err := run(f, 1<<20, func(string) []string { return []string{"sh", "-c", "echo done; sleep 5 &"} })
+	if err != nil || out != "done\n" {
+		t.Errorf("a converter that leaves a child behind: %q, %v", out, err)
+	}
+	if took := time.Since(start); took > 3*time.Second {
+		t.Errorf("waited %v on a converter's leftover child", took)
 	}
 }
