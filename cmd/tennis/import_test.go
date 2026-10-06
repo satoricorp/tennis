@@ -1886,3 +1886,39 @@ func TestAddReadsPlainFilesWhenNoTranscriptTurnsUp(t *testing.T) {
 		})
 	}
 }
+
+// A deck's media carry no text, so they don't count toward the document cap:
+// a Keynote file with a long video in it is still read for its slides.
+func TestBundleSizeLeavesOutMedia(t *testing.T) {
+	dir := t.TempDir()
+	deck := filepath.Join(dir, "Talk.key")
+	for _, d := range []string{"Index", "Data", "Metadata"} {
+		if err := os.MkdirAll(filepath.Join(deck, d), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(deck, "Index", "Slide.iwa"), make([]byte, 4096), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// Sparse, so the test writes nothing like 200MB to disk.
+	video := filepath.Join(deck, "Data", "demo.mov")
+	f, err := os.Create(video)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Truncate(2 * maxDocumentSize); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+
+	size, mod := bundleStat(os.DirFS(dir), "Talk.key")
+	if size != 4096 {
+		t.Errorf("size = %d, want 4096: the video should not count", size)
+	}
+	if mod.IsZero() {
+		t.Error("mod is zero; want the newest file's time")
+	}
+	if _, err := fileText(fileEntry{name: "Talk.key", path: deck, size: size}); err != nil && strings.Contains(err.Error(), "cap") {
+		t.Errorf("fileText refused the deck on size: %v", err)
+	}
+}

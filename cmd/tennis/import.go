@@ -602,12 +602,17 @@ func isDocument(name string) bool {
 	return isBundle && document
 }
 
-// bundleStat measures a document saved as a folder: the size of everything
-// in it, and when any of it last changed. The folder's own time moves only
-// when something is added to its top level or taken from it, and an edit
-// to a Pages document rewrites a file further down.
+// bundleStat measures a document saved as a folder: the size of what a
+// reader has to read in it, and when any of it last changed. The folder's own
+// time moves only when something is added to its top level or taken from it,
+// and an edit to a Pages document rewrites a file further down.
+//
+// The pictures, sound and video a deck or a document carries are left out of
+// the size. Neither Spotlight nor textutil reads them for text, and counting
+// them would put any Keynote deck with a video in it over the document cap,
+// which exists to keep a reader from being handed more than it can read.
 func bundleStat(fsys fs.FS, p string) (size int64, mod time.Time) {
-	fs.WalkDir(fsys, p, func(_ string, d fs.DirEntry, err error) error {
+	fs.WalkDir(fsys, p, func(name string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return nil
 		}
@@ -615,7 +620,7 @@ func bundleStat(fsys fs.FS, p string) (size int64, mod time.Time) {
 		if err != nil {
 			return nil
 		}
-		if !d.IsDir() {
+		if !d.IsDir() && !bundleMedia[strings.ToLower(path.Ext(name))] {
 			size += info.Size()
 		}
 		if info.ModTime().After(mod) {
@@ -625,6 +630,12 @@ func bundleStat(fsys fs.FS, p string) (size int64, mod time.Time) {
 	})
 	return size, mod
 }
+
+// bundleMedia is what bundleStat leaves out of a bundle's size: the pictures,
+// sound and video inside it, which carry no text for a reader to find.
+var bundleMedia = extSet(".png .jpg .jpeg .gif .heic .heif .webp .tiff .tif .bmp .pdf " +
+	".mp3 .m4a .wav .aac .aiff .aif .caf " +
+	".mp4 .mov .m4v .avi")
 
 func (a *archive) open(p string) (fs.File, error) {
 	f, err := a.fsys.Open(p)
