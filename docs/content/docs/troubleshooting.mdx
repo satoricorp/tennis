@@ -160,4 +160,4 @@ rm ~/.tennis/db.sqlite        # everything indexed
 rm -rf ~/.cache/tennis        # the downloaded model
 ```
 
-The cards in `~/tennis` (or `$TENNIS_CARDS`) are ordinary markdown files that Tennis writes and never reads back; delete any you do not want. Nothing else on your machine is state.
+The cards in `~/tennis` (or `$TENNIS_CARDS`) are ordinary markdown files that Tennis writes and never reads back into the index; delete any you do not want, and the next `add` of their source writes them again. Nothing else on your machine is state.

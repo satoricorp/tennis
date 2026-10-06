@@ -61,7 +61,7 @@ DATE             SOURCE         DOCS  TITLE
 2 sessions
 ```
 
-`ls` groups by session, newest first; `tennis ls chatgpt` narrows to one source, and `--docs` lists documents instead. The [CLI](/cli#tennis-ls) page has every flag.
+`ls` groups by session, newest first, with any files you have added listed among them by date; `tennis ls chatgpt` narrows to one source, and `--docs` lists documents instead. The [CLI](/cli#tennis-ls) page has every flag.
 
 ## Turns or conversations
 
@@ -94,8 +94,10 @@ Session documents are keyed by the export's own conversation and message IDs. A 
 
 ```bash
 $ tennis add ~/Downloads/claude-export-2.zip
-imported 412, skipped 11423 unchanged, 502 chunks in "context"
+imported 412, skipped 11423 unchanged, 502 chunks in "context", 37 cards in /Users/you/tennis
 ```
+
+Cards follow the same rule: only the conversations that gained messages, or are new, get their card written again, so the summaries already on disk cost nothing the second time.
 
 ## What is deliberately left out
 

@@ -123,10 +123,10 @@ The `[kw#1 sem#1]` tag says which ranker found a hit, and where in that ranker's
 
 ```bash
 $ tennis add ~/Documents/notes 2>/dev/null
-imported 0, skipped 3 unchanged, 0 chunks in "context", 3 cards in /Users/you/tennis
+imported 0, skipped 3 unchanged, 0 chunks in "context"
 ```
 
-Unchanged files are never re-read into the model. Re-adding a large corpus after editing one file costs about as much as indexing one file.
+Unchanged files are never re-read into the model, and their cards are left as they are. Re-adding a large corpus after editing one file costs about as much as indexing one file.
 
 ## Index your history
 
@@ -140,13 +140,16 @@ imported 5, skipped 0 unchanged, 5 chunks in "context", 2 cards in /Users/you/te
 
 $ tennis ls
 DATE             SOURCE         DOCS  TITLE
+2026-10-05 09:02 file              1  auth.md
+2026-10-05 09:02 file              1  config.md
+2026-10-05 09:02 file              1  retry.md
 2026-08-03 04:30 claude-code       2  TOML config parser with defaults
 2026-08-01 05:01 claude-code       3  Flaky auth test: token refresh window
 
-2 sessions
+5 sessions and files
 ```
 
-`ls` shows what is there without running a search. The two new cards are a readable copy of each conversation, written to `~/tennis` beside the ones for your notes — and summarized, if you set an API key. See [Importing sessions](/importing) and [Cards](/cards).
+`ls` shows what is there without running a search: your three notes and the two conversations, newest first, one row each. The two new cards are a readable copy of each conversation, written to `~/tennis` beside the ones for your notes — and summarized, if you set an API key. See [Importing sessions](/importing) and [Cards](/cards).
 
 ## Next steps
 
@@ -229,7 +232,7 @@ tennis add ./docs --json                      # machine-readable
 | `--db <path>` | database file (default `~/.tennis/db.sqlite`, or `$TENNIS_DB`) |
 | `--json` | machine-readable output on stdout; progress goes to stderr |
 
-Every conversation and every file `add` reads is also written out as a card: one markdown file each in `~/tennis`, with its details in frontmatter and a summary when you have an API key. Without a key, a conversation's card carries its opening message and a file's its first lines. `--ndjson` documents get no card, because they are neither conversations nor files. [Cards](/cards) has the whole story.
+Every conversation and every file `add` reads is also written out as a card: one markdown file each in `~/tennis`, with its details in frontmatter and a summary when you have an API key. Without a key, a conversation's card carries its opening message and a file's its first lines. Adding the same source again rewrites only the cards whose conversation or file changed, so a re-add makes no model calls for what is already summarized. `--ndjson` documents get no card, because they are neither conversations nor files. [Cards](/cards) has the whole story.
 
 ```bash
 $ tennis add ~/.claude
@@ -366,13 +369,16 @@ A conversation is printed in turn order under its title, with back-to-back turns
 ```bash
 $ tennis ls
 DATE             SOURCE         DOCS  TITLE
+2026-10-05 09:02 file              1  auth.md
+2026-10-05 09:02 file              1  config.md
+2026-10-05 09:02 file              1  retry.md
 2026-08-03 04:30 claude-code       2  TOML config parser with defaults
 2026-08-01 05:01 claude-code       3  Flaky auth test: token refresh window
 
-2 sessions
+5 sessions and files
 ```
 
-It groups by session rather than listing documents, because `add` stores one document per turn by default and a flat listing of those is thirty thousand rows nobody asked for. Newest first; dates are shown in your local time. A bare word filters by source, because `tennis ls chatgpt` is what people type before they read the flags:
+It groups by session rather than listing documents, because `add` stores one document per turn by default and a flat listing of those is thirty thousand rows nobody asked for. A conversation is one row however many turns it was stored as, and `DOCS` is how many. A file has no session, so it is a row of its own, dated by when it was last modified and listed among the conversations by date. Newest first; dates are shown in your local time. A bare word filters by source, because `tennis ls chatgpt` is what people type before they read the flags:
 
 ```bash
 tennis ls chatgpt                       # only ChatGPT sessions
@@ -393,36 +399,50 @@ tennis ls --json
 | `-n <count>` | how many to list (default 25; `0` for all) |
 | `--offset <count>` | skip this many |
 | `--where <filter>` | attribute filter, same syntax as `search` |
-| `--sort <attr>` | attribute to sort by (default `created`) |
+| `--sort <attr>` | attribute to sort by (default `created`, or `modified` for a file) |
 | `--asc` | oldest first |
 | `--ns <name>` | namespace (default `context`, or `$TENNIS_NS`) |
 | `--db <path>` | database file |
 | `--json` | machine-readable output |
 
-`--docs` is the flat view. Plain files show up here with their path as the id, since a file is not a session:
+`--docs` is the flat view: one row per turn and per file, with a file's path as its id:
 
 ```bash
 $ tennis ls --docs -n 4
 DATE             SOURCE       KIND     CHUNKS  ID
+2026-10-05 09:02              file          1  /Users/you/Documents/notes/auth.md
+2026-10-05 09:02              file          1  /Users/you/Documents/notes/config.md
+2026-10-05 09:02              file          1  /Users/you/Documents/notes/retry.md
 2026-08-03 04:30 claude-code  message       1  claude-code:b81e9d44-6c7a-4e2b-8f1d-3a4b5c6d7e8…
-2026-08-03 04:30 claude-code  message       1  claude-code:b81e9d44-6c7a-4e2b-8f1d-3a4b5c6d7e8…
-2026-08-01 05:01 claude-code  message       1  claude-code:7f3a2c10-1b2e-4d5f-9a8b-0c1d2e3f4a5…
-2026-08-01 05:00 claude-code  message       1  claude-code:7f3a2c10-1b2e-4d5f-9a8b-0c1d2e3f4a5…
 
 4 of 8 documents (--offset 4 for more, -n 0 for all)
 ```
 
-The tally under the table goes to stderr, so `tennis ls --json | jq` sees only the rows. In the session view `--json` gives each group's key, document and chunk counts, and the attributes shared across the group:
+The tally under the table goes to stderr, so `tennis ls --json | jq` sees only the rows. In the session view `--json` gives each row's key, document and chunk counts, and the attributes shared across the group; a file's row is marked `"ungrouped": true` and carries the file's own attributes. Two of the rows above, as JSON:
 
 ```json
 [
+  {
+    "key": "/Users/you/Documents/notes/retry.md",
+    "ungrouped": true,
+    "documents": 1,
+    "chunks": 1,
+    "attributes": {
+      "kind": "file",
+      "modified": "2026-10-05T14:02:11Z",
+      "name": "retry.md",
+      "path": "/Users/you/Documents/notes/retry.md",
+      "size": 114
+    }
+  },
   {
     "key": "b81e9d44-6c7a-4e2b-8f1d-3a4b5c6d7e8f",
     "documents": 2,
     "chunks": 2,
     "attributes": {
       "created": "2026-08-03T09:30:08Z",
-      "source": "claude-code"
+      "source": "claude-code",
+      "title": "TOML config parser with defaults"
     }
   }
 ]
@@ -633,7 +653,7 @@ DATE             SOURCE         DOCS  TITLE
 2 sessions
 ```
 
-`ls` groups by session, newest first; `tennis ls chatgpt` narrows to one source, and `--docs` lists documents instead. The [CLI](/cli#tennis-ls) page has every flag.
+`ls` groups by session, newest first, with any files you have added listed among them by date; `tennis ls chatgpt` narrows to one source, and `--docs` lists documents instead. The [CLI](/cli#tennis-ls) page has every flag.
 
 ## Turns or conversations
 
@@ -666,8 +686,10 @@ Session documents are keyed by the export's own conversation and message IDs. A 
 
 ```bash
 $ tennis add ~/Downloads/claude-export-2.zip
-imported 412, skipped 11423 unchanged, 502 chunks in "context"
+imported 412, skipped 11423 unchanged, 502 chunks in "context", 37 cards in /Users/you/tennis
 ```
+
+Cards follow the same rule: only the conversations that gained messages, or are new, get their card written again, so the summaries already on disk cost nothing the second time.
 
 ## What is deliberately left out
 
@@ -714,6 +736,8 @@ turns: 3
 project: -Users-you-git-app
 cwd: /Users/you/git/app
 branch: main
+summarizer: "anthropic:claude-opus-5"
+digest: 6bbfd864159bd8a3
 ---
 
 # Flaky auth test: token refresh window
@@ -725,7 +749,7 @@ expired token. The window was widened and a regression test added.
 Full conversation: `tennis search --where 'session=7f3a2c10-1b2e-4d5f-9a8b-0c1d2e3f4a5b'`
 ```
 
-The frontmatter carries what the import knew: the document-id prefix as `session`, the `source`, the `title`, when it was `created`, how many `turns` it ran, and for local agent sessions the `project`, `cwd`, and `branch` when the transcript recorded them. The last line is how to get the rest: run it and `search` prints the whole conversation, turn by turn (see [Reading, not ranking](/cli#reading-not-ranking)). The card's whole job is to be readable on its own and to say where the full record lives.
+The frontmatter carries what the import knew: the document-id prefix as `session`, the `source`, the `title`, when it was `created`, how many `turns` it ran, and for local agent sessions the `project`, `cwd`, and `branch` when the transcript recorded them. `summarizer` names the model that wrote the prose, and is absent when the card carries the opening message instead. `digest` is how the next `add` tells whether the card needs writing again — see [Adding again](#adding-again). The last line is how to get the rest: run it and `search` prints the whole conversation, turn by turn (see [Reading, not ranking](/cli#reading-not-ranking)). The card's whole job is to be readable on its own and to say where the full record lives.
 
 The filename is the UTC timestamp, the source, and a slug of the title: `2026-08-01-100000-claude-code-flaky-auth-test-token-refresh-window.md`. Claude Code names a session several turns in, so importing twice can produce two titles for one conversation; the timestamp-and-source prefix is stable, and a re-import replaces the older card rather than leaving both.
 
@@ -738,6 +762,7 @@ source: file
 title: auth.md
 modified: 2026-10-05T14:02:11Z
 size: 163
+digest: 67094aa163f55aba
 ---
 
 # auth.md
@@ -753,9 +778,26 @@ Full text: `tennis search --where 'path=/Users/you/Documents/notes/auth.md'`
 
 That one was written without an API key, so in place of a summary it carries the file's first lines, fenced so a spreadsheet's rows stay rows. With a key, it is a few sentences of prose like a conversation's.
 
-The frontmatter is the file's: its absolute path as `file`, `source: file`, its name as the `title`, when it was last `modified`, and its `size` in bytes. The last line prints the text Tennis indexed for it, exactly as it was read.
+The frontmatter is the file's: its absolute path as `file`, `source: file`, its name as the `title`, when it was last `modified`, and its `size` in bytes, then the same `summarizer` and `digest` a conversation's card has. The last line prints the text Tennis indexed for it, exactly as it was read.
 
 The filename is a slug of the file's name and the first eight hex digits of a SHA-256 of its path: `auth-md-3f9e328a.md`. Nothing in it depends on the file's contents or dates, so re-adding a folder after editing a file updates that file's card in place, and the hash keeps two `notes.md` in different folders apart. A file that moves or is renamed gets a new card; the old one stays until you delete it.
+
+## Adding again
+
+Running `add` on the same source again leaves a card alone unless there is a reason to write it:
+
+- what it describes changed — a conversation gained turns, a file was edited;
+- the card is gone, because you deleted it;
+- it carries the opening message or lines, and a key is now set to summarize it.
+
+So a re-add makes no model calls for anything already summarized, and with nothing changed it writes no cards at all:
+
+```bash
+$ tennis add ~/Documents/notes 2>/dev/null
+imported 0, skipped 3 unchanged, 0 chunks in "context"
+```
+
+The test is the `digest` in the card's frontmatter: a hash of the text the summarizer reads and every field the frontmatter shows, but not the layout, so a change to how cards look does not re-summarize the folder. An add with no key never replaces a summary with an opening, and edits you make to a card's body survive until what it describes changes. With `--json` the counts come back as `cards`, `cards_unchanged`, and `cards_unsummarized`.
 
 ## Where they go
 
@@ -794,13 +836,13 @@ tennis: no ANTHROPIC_API_KEY or OPENAI_API_KEY; cards will carry the opening mes
 
 The model is asked a different question for each. For a conversation it writes two to four sentences on what the person was trying to do, what was decided or produced, and what was left unresolved. For a file, "what was decided" is the wrong question — a spreadsheet decided nothing — so it is asked what the file is, what it holds, and what someone would open it to find, and is given the file's name and path alongside its text.
 
-Four summaries are in flight at a time, so a first import of several hundred conversations or files is bounded by the provider's rate limit rather than by one round trip after another. A summary that fails — a refusal, a timeout, a rate limit on item 300 — costs that card its prose and nothing else: the card is written with its opening message or opening lines, the failure is reported on stderr, and the import carries on. With `--json` the counts come back as `cards` and `cards_unsummarized`.
+Four summaries are in flight at a time, so a first import of several hundred conversations or files is bounded by the provider's rate limit rather than by one round trip after another. A summary that fails — a refusal, a timeout, a rate limit on item 300 — costs that card its prose and nothing else: the card is written with its opening message or opening lines, the failure is reported on stderr and counted as `cards_unsummarized`, the import carries on, and the next `add` tries that card again.
 
 The summarizer sees a conversation's text, not its tool calls and results, with consecutive turns from one speaker merged. A very long session or file is cut in the middle: the first 24,000 characters and the last 8,000 are kept, because the opening says what it set out to do and the end says how it finished.
 
 ## Why they are not indexed
 
-Tennis writes cards and never reads them back. The documents in SQLite are the record; a card is a rendering of one. That one-way rule is what makes cards safe to edit, move, delete, or hand to another tool without touching the archive.
+Tennis never reads a card back into the index; the one thing it reads from a card is the `digest` in its frontmatter. The documents in SQLite are the record, and a card is a rendering of one. That one-way rule is what makes cards safe to edit, move, delete, or hand to another tool without touching the archive.
 
 It is also why `tennis add ~/tennis` is not something to do. Indexing the cards would rank every conversation and file twice — once as a short, on-topic summary and once as the full text that actually holds the answer — and the summary would usually win.
 
@@ -1417,4 +1459,4 @@ rm ~/.tennis/db.sqlite        # everything indexed
 rm -rf ~/.cache/tennis        # the downloaded model
 ```
 
-The cards in `~/tennis` (or `$TENNIS_CARDS`) are ordinary markdown files that Tennis writes and never reads back; delete any you do not want. Nothing else on your machine is state.
+The cards in `~/tennis` (or `$TENNIS_CARDS`) are ordinary markdown files that Tennis writes and never reads back into the index; delete any you do not want, and the next `add` of their source writes them again. Nothing else on your machine is state.

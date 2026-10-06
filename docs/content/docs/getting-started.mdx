@@ -96,10 +96,10 @@ The `[kw#1 sem#1]` tag says which ranker found a hit, and where in that ranker's
 
 ```bash
 $ tennis add ~/Documents/notes 2>/dev/null
-imported 0, skipped 3 unchanged, 0 chunks in "context", 3 cards in /Users/you/tennis
+imported 0, skipped 3 unchanged, 0 chunks in "context"
 ```
 
-Unchanged files are never re-read into the model. Re-adding a large corpus after editing one file costs about as much as indexing one file.
+Unchanged files are never re-read into the model, and their cards are left as they are. Re-adding a large corpus after editing one file costs about as much as indexing one file.
 
 ## Index your history
 
@@ -113,13 +113,16 @@ imported 5, skipped 0 unchanged, 5 chunks in "context", 2 cards in /Users/you/te
 
 $ tennis ls
 DATE             SOURCE         DOCS  TITLE
+2026-10-05 09:02 file              1  auth.md
+2026-10-05 09:02 file              1  config.md
+2026-10-05 09:02 file              1  retry.md
 2026-08-03 04:30 claude-code       2  TOML config parser with defaults
 2026-08-01 05:01 claude-code       3  Flaky auth test: token refresh window
 
-2 sessions
+5 sessions and files
 ```
 
-`ls` shows what is there without running a search. The two new cards are a readable copy of each conversation, written to `~/tennis` beside the ones for your notes — and summarized, if you set an API key. See [Importing sessions](/importing) and [Cards](/cards).
+`ls` shows what is there without running a search: your three notes and the two conversations, newest first, one row each. The two new cards are a readable copy of each conversation, written to `~/tennis` beside the ones for your notes — and summarized, if you set an API key. See [Importing sessions](/importing) and [Cards](/cards).
 
 ## Next steps
 

@@ -74,7 +74,7 @@ tennis add ./docs --json                      # machine-readable
 | `--db <path>` | database file (default `~/.tennis/db.sqlite`, or `$TENNIS_DB`) |
 | `--json` | machine-readable output on stdout; progress goes to stderr |
 
-Every conversation and every file `add` reads is also written out as a card: one markdown file each in `~/tennis`, with its details in frontmatter and a summary when you have an API key. Without a key, a conversation's card carries its opening message and a file's its first lines. `--ndjson` documents get no card, because they are neither conversations nor files. [Cards](/cards) has the whole story.
+Every conversation and every file `add` reads is also written out as a card: one markdown file each in `~/tennis`, with its details in frontmatter and a summary when you have an API key. Without a key, a conversation's card carries its opening message and a file's its first lines. Adding the same source again rewrites only the cards whose conversation or file changed, so a re-add makes no model calls for what is already summarized. `--ndjson` documents get no card, because they are neither conversations nor files. [Cards](/cards) has the whole story.
 
 ```bash
 $ tennis add ~/.claude
@@ -211,13 +211,16 @@ A conversation is printed in turn order under its title, with back-to-back turns
 ```bash
 $ tennis ls
 DATE             SOURCE         DOCS  TITLE
+2026-10-05 09:02 file              1  auth.md
+2026-10-05 09:02 file              1  config.md
+2026-10-05 09:02 file              1  retry.md
 2026-08-03 04:30 claude-code       2  TOML config parser with defaults
 2026-08-01 05:01 claude-code       3  Flaky auth test: token refresh window
 
-2 sessions
+5 sessions and files
 ```
 
-It groups by session rather than listing documents, because `add` stores one document per turn by default and a flat listing of those is thirty thousand rows nobody asked for. Newest first; dates are shown in your local time. A bare word filters by source, because `tennis ls chatgpt` is what people type before they read the flags:
+It groups by session rather than listing documents, because `add` stores one document per turn by default and a flat listing of those is thirty thousand rows nobody asked for. A conversation is one row however many turns it was stored as, and `DOCS` is how many. A file has no session, so it is a row of its own, dated by when it was last modified and listed among the conversations by date. Newest first; dates are shown in your local time. A bare word filters by source, because `tennis ls chatgpt` is what people type before they read the flags:
 
 ```bash
 tennis ls chatgpt                       # only ChatGPT sessions
@@ -238,36 +241,50 @@ tennis ls --json
 | `-n <count>` | how many to list (default 25; `0` for all) |
 | `--offset <count>` | skip this many |
 | `--where <filter>` | attribute filter, same syntax as `search` |
-| `--sort <attr>` | attribute to sort by (default `created`) |
+| `--sort <attr>` | attribute to sort by (default `created`, or `modified` for a file) |
 | `--asc` | oldest first |
 | `--ns <name>` | namespace (default `context`, or `$TENNIS_NS`) |
 | `--db <path>` | database file |
 | `--json` | machine-readable output |
 
-`--docs` is the flat view. Plain files show up here with their path as the id, since a file is not a session:
+`--docs` is the flat view: one row per turn and per file, with a file's path as its id:
 
 ```bash
 $ tennis ls --docs -n 4
 DATE             SOURCE       KIND     CHUNKS  ID
+2026-10-05 09:02              file          1  /Users/you/Documents/notes/auth.md
+2026-10-05 09:02              file          1  /Users/you/Documents/notes/config.md
+2026-10-05 09:02              file          1  /Users/you/Documents/notes/retry.md
 2026-08-03 04:30 claude-code  message       1  claude-code:b81e9d44-6c7a-4e2b-8f1d-3a4b5c6d7e8…
-2026-08-03 04:30 claude-code  message       1  claude-code:b81e9d44-6c7a-4e2b-8f1d-3a4b5c6d7e8…
-2026-08-01 05:01 claude-code  message       1  claude-code:7f3a2c10-1b2e-4d5f-9a8b-0c1d2e3f4a5…
-2026-08-01 05:00 claude-code  message       1  claude-code:7f3a2c10-1b2e-4d5f-9a8b-0c1d2e3f4a5…
 
 4 of 8 documents (--offset 4 for more, -n 0 for all)
 ```
 
-The tally under the table goes to stderr, so `tennis ls --json | jq` sees only the rows. In the session view `--json` gives each group's key, document and chunk counts, and the attributes shared across the group:
+The tally under the table goes to stderr, so `tennis ls --json | jq` sees only the rows. In the session view `--json` gives each row's key, document and chunk counts, and the attributes shared across the group; a file's row is marked `"ungrouped": true` and carries the file's own attributes. Two of the rows above, as JSON:
 
 ```json
 [
+  {
+    "key": "/Users/you/Documents/notes/retry.md",
+    "ungrouped": true,
+    "documents": 1,
+    "chunks": 1,
+    "attributes": {
+      "kind": "file",
+      "modified": "2026-10-05T14:02:11Z",
+      "name": "retry.md",
+      "path": "/Users/you/Documents/notes/retry.md",
+      "size": 114
+    }
+  },
   {
     "key": "b81e9d44-6c7a-4e2b-8f1d-3a4b5c6d7e8f",
     "documents": 2,
     "chunks": 2,
     "attributes": {
       "created": "2026-08-03T09:30:08Z",
-      "source": "claude-code"
+      "source": "claude-code",
+      "title": "TOML config parser with defaults"
     }
   }
 ]
