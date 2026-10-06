@@ -468,6 +468,9 @@ func cmdSearch(args []string) error {
 		return err
 	}
 	o.capped = flagGiven(fs_, "k", "n")
+	if err := o.check(); err != nil {
+		return err
+	}
 	if len(pos) < 1 {
 		if strings.TrimSpace(o.where) != "" {
 			return runRead(resolveNS(*nsName), o)
@@ -487,6 +490,9 @@ func cmdMatch(args []string) error {
 		return err
 	}
 	o.capped = flagGiven(fs_, "k", "n")
+	if err := o.check(); err != nil {
+		return err
+	}
 	if len(pos) == 1 && strings.TrimSpace(o.where) != "" {
 		return runRead(pos[0], o)
 	}
@@ -503,6 +509,20 @@ type searchOpts struct {
 	capped bool // -k or -n was given, rather than defaulted
 	mode   string
 	where  string
+}
+
+// check rejects flag values that would otherwise be quietly misread: a
+// negative count, and a mode no ranker answers to, which ran neither and
+// reported no matches.
+func (o searchOpts) check() error {
+	if o.topK < 0 {
+		return fmt.Errorf("usage: -k cannot be negative (got %d)", o.topK)
+	}
+	switch tennis.Mode(o.mode) {
+	case tennis.Hybrid, tennis.Keyword, tennis.Semantic:
+		return nil
+	}
+	return fmt.Errorf("usage: --mode is hybrid, keyword or semantic, not %q", o.mode)
 }
 
 // flagGiven reports whether any of the named flags was set on the command
@@ -575,8 +595,14 @@ func runSearch(nsName, query string, o searchOpts) error {
 // those is a fragment; the record a card points at is all of them, in the
 // order they were said. So a filter with no query lists rather than ranks,
 // and -k applies only when asked for — its default of one exists to make a
-// ranked answer short, which is not the point here.
+// ranked answer short, which is not the point here. -k 0 is every match, as
+// ls -n 0 is.
 func runRead(nsName string, o searchOpts) error {
+	// With nothing to rank there is nothing for a ranker to do, and saying so
+	// beats printing the same transcript whichever one was named.
+	if tennis.Mode(o.mode) != tennis.Hybrid {
+		return fmt.Errorf("--mode %s needs a query: with --where alone, search reads every match rather than ranking", o.mode)
+	}
 	db, err := open(o.dbPath, o.asJSON)
 	if err != nil {
 		return err
@@ -594,18 +620,15 @@ func runRead(nsName string, o searchOpts) error {
 	}
 
 	// List orders by one attribute, so turns come back by index across every
-	// session that matched. The stable sort by session afterwards gathers each
-	// conversation back together without disturbing its order. Files carry no
-	// session and so come first; anything in a session with no index — a
-	// conversation imported whole — follows that session's turns.
+	// session that matched, with anything that has no index — a conversation
+	// imported whole — after them. readOrder keeps that order within each
+	// thread while it gathers the threads and sessions apart.
 	infos, err := ns.List(ctx, tennis.ListOptions{Filter: filter, Limit: -1, SortBy: "index", Asc: true})
 	if err != nil {
 		return err
 	}
-	sort.SliceStable(infos, func(i, j int) bool {
-		return attrString(infos[i].Attributes, "session") < attrString(infos[j].Attributes, "session")
-	})
-	if o.capped && o.topK >= 0 && len(infos) > o.topK {
+	infos = readOrder(infos)
+	if o.capped && o.topK > 0 && len(infos) > o.topK {
 		infos = infos[:o.topK]
 	}
 
@@ -630,34 +653,191 @@ func runRead(nsName string, o searchOpts) error {
 	return nil
 }
 
+// readGroup is documents that print together — a session, a file, or one
+// thread of a session — and when the earliest of them is dated.
+type readGroup struct {
+	name  string
+	at    time.Time
+	dated bool
+	docs  []tennis.DocumentInfo
+}
+
+// groupDocs gathers documents by key, keeping each group in the order the
+// documents came, and dates each group by its earliest created, or modified
+// where a document has no created. name is what breaks a tie in date.
+func groupDocs(infos []tennis.DocumentInfo, key func(tennis.DocumentInfo) (k, name string)) []*readGroup {
+	var out []*readGroup
+	byKey := map[string]*readGroup{}
+	for _, info := range infos {
+		k, name := key(info)
+		g := byKey[k]
+		if g == nil {
+			g = &readGroup{name: name}
+			byKey[k] = g
+			out = append(out, g)
+		}
+		g.docs = append(g.docs, info)
+		t, ok := attrTime(info.Attributes["created"])
+		if !ok {
+			t, ok = attrTime(info.Attributes["modified"])
+		}
+		if ok && (!g.dated || t.Before(g.at)) {
+			g.at, g.dated = t, true
+		}
+	}
+	return out
+}
+
+// sortGroups puts groups oldest first, the undated after the dated, and
+// otherwise by name.
+func sortGroups(gs []*readGroup) {
+	sort.SliceStable(gs, func(i, j int) bool {
+		a, b := gs[i], gs[j]
+		if a.dated != b.dated {
+			return a.dated
+		}
+		if a.dated && !a.at.Equal(b.at) {
+			return a.at.Before(b.at)
+		}
+		return a.name < b.name
+	})
+}
+
+// readOrder is the order runRead prints in. What the filter matched is cut
+// into units — a session, or a document belonging to none, such as a file —
+// and the units run oldest first, because a session's ID says nothing about
+// when it happened. Within a session the main thread comes first, then each
+// subagent the session started, oldest first: a subagent's turns are numbered
+// from zero in its own transcript, so ordering the session by index alone
+// would shuffle every thread into the others.
+func readOrder(infos []tennis.DocumentInfo) []tennis.DocumentInfo {
+	units := groupDocs(infos, func(info tennis.DocumentInfo) (string, string) {
+		if s := attrString(info.Attributes, "session"); s != "" {
+			return "session\x00" + s, s
+		}
+		return "doc\x00" + info.ID, info.ID
+	})
+	sortGroups(units)
+
+	out := make([]tennis.DocumentInfo, 0, len(infos))
+	for _, u := range units {
+		threads := groupDocs(u.docs, func(info tennis.DocumentInfo) (string, string) {
+			s := attrString(info.Attributes, "subagent")
+			return s, s
+		})
+		var subagents []*readGroup
+		for _, t := range threads {
+			if t.name == "" {
+				out = append(out, t.docs...)
+				continue
+			}
+			subagents = append(subagents, t)
+		}
+		sortGroups(subagents)
+		for _, t := range subagents {
+			out = append(out, t.docs...)
+		}
+	}
+	return out
+}
+
 // renderDocs writes documents out in full. A conversation's turns become one
 // transcript under its title — the rendering the summarizer read, so a card
-// and the record behind it read alike. Anything without a speaker, a file
-// above all, is its text exactly as it was indexed.
+// and the record behind it read alike — with each subagent's turns after the
+// main thread's, under a heading of their own. Anything without a speaker, a
+// file above all, is its text exactly as it was indexed.
+//
+// One unit, which is what a card's command asks for, prints as just that.
+// Several are told apart: each file is headed the way head(1) heads one of
+// several, and each session opens with its title, or with its source and ID
+// when it has none.
 func renderDocs(docs []tennis.Document) string {
-	var blocks []string
-	for i := 0; i < len(docs); {
-		first := docs[i].Attributes
-		if attrString(first, "role") == "" {
-			blocks = append(blocks, strings.TrimRight(docs[i].Text, "\n"))
-			i++
+	var units [][]tennis.Document
+	for i, d := range docs {
+		if i > 0 && sameSession(docs[i-1], d) {
+			units[len(units)-1] = append(units[len(units)-1], d)
 			continue
 		}
-		var c conversation
-		for ; i < len(docs); i++ {
-			a := docs[i].Attributes
-			if attrString(a, "role") == "" || attrString(a, "session") != attrString(first, "session") {
-				break
-			}
-			c.turns = append(c.turns, turn{role: attrString(a, "role"), text: docs[i].Text})
-		}
-		block := c.transcript()
-		if t := attrString(first, "title"); t != "" {
-			block = "# " + t + "\n\n" + block
-		}
-		blocks = append(blocks, block)
+		units = append(units, []tennis.Document{d})
+	}
+	blocks := make([]string, len(units))
+	for i, u := range units {
+		blocks[i] = renderUnit(u, len(units) > 1)
 	}
 	return strings.Join(blocks, "\n\n") + "\n"
+}
+
+func sameSession(a, b tennis.Document) bool {
+	s := attrString(a.Attributes, "session")
+	return s != "" && s == attrString(b.Attributes, "session")
+}
+
+// renderUnit writes one session, or one document that belongs to none. many
+// says whether it is one of several, and so needs a heading to be told apart.
+func renderUnit(docs []tennis.Document, many bool) string {
+	var parts []string
+	var run conversation
+	flush := func() {
+		if len(run.turns) > 0 {
+			parts = append(parts, run.transcript())
+			run.turns = nil
+		}
+	}
+	thread, turns := "", false
+	for _, d := range docs {
+		a := d.Attributes
+		if s := attrString(a, "subagent"); s != thread {
+			flush()
+			thread = s
+			if s != "" {
+				parts = append(parts, "## subagent "+s)
+			}
+		}
+		if role := attrString(a, "role"); role != "" {
+			run.turns = append(run.turns, turn{role: role, text: d.Text})
+			turns = true
+			continue
+		}
+		flush()
+		parts = append(parts, strings.TrimRight(d.Text, "\n"))
+	}
+	flush()
+	body := strings.Join(parts, "\n\n")
+
+	first := docs[0]
+	session := attrString(first.Attributes, "session")
+	if session == "" {
+		if !many {
+			return body
+		}
+		name := attrString(first.Attributes, "path")
+		if name == "" {
+			name = first.ID
+		}
+		return "==> " + name + " <==\n" + body
+	}
+
+	title := ""
+	for _, d := range docs {
+		if title = attrString(d.Attributes, "title"); title != "" {
+			break
+		}
+	}
+	// Alone, a session is headed as its transcript always was, by the title
+	// over its turns. Among several, every session is headed, by its source
+	// and ID when it has no title.
+	var heading string
+	switch {
+	case title != "" && (turns || many):
+		heading = "# " + title
+	case many:
+		heading = "# " + strings.TrimSpace(attrString(first.Attributes, "source")+" session "+session)
+	}
+	// A conversation imported whole already opens with its title.
+	if heading == "" || body == heading || strings.HasPrefix(body, heading+"\n") {
+		return body
+	}
+	return heading + "\n\n" + body
 }
 
 // renderResults writes the human-readable form of a result set. The styling

@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -163,5 +164,44 @@ func TestLSListsFiles(t *testing.T) {
 	}
 	if tally != "3 sessions and files" {
 		t.Errorf("tally = %q, want 3 sessions and files", tally)
+	}
+}
+
+// TestLSDatesANumber: add --ndjson takes a created date as it is given, and
+// one given as Unix seconds left the DATE column blank. ls's rows are grouped
+// in SQLite, which hands a whole number back as int64, and only float64 was
+// read. The number now dates the row like any other date.
+func TestLSDatesANumber(t *testing.T) {
+	sec := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC).Unix()
+	want := time.Unix(sec, 0).Format("2006-01-02 15:04")
+	for _, raw := range []any{sec, float64(sec)} {
+		if got := attrDate(map[string]any{"created": raw}, "created"); got != want {
+			t.Errorf("attrDate(%T %v) = %q, want %q", raw, raw, got, want)
+		}
+	}
+
+	t.Setenv("TENNIS_CACHE", ndjsonTestCache(t))
+	t.Setenv("TENNIS_CARDS", t.TempDir())
+	t.Setenv("TENNIS_NS", "")
+	t.Setenv("ANTHROPIC_API_KEY", "")
+	t.Setenv("OPENAI_API_KEY", "")
+	dbPath := filepath.Join(t.TempDir(), "ls.sqlite")
+	withStdin(t, fmt.Sprintf(`{"id":"n1","text":"a date as a number","attributes":{"session":"n","title":"Numeric","created":%d}}`+"\n", sec))
+	if out, err := captureStdout(t, func() error {
+		return cmdAdd([]string{"--db", dbPath, "--json", "--ndjson"})
+	}); err != nil {
+		t.Fatalf("add: %v\noutput: %s", err, out)
+	}
+	var out string
+	if _, err := captureStderr(t, func() error {
+		var err error
+		out, err = captureStdout(t, func() error { return cmdLS([]string{"--db", dbPath}) })
+		return err
+	}); err != nil {
+		t.Fatalf("ls: %v\noutput: %s", err, out)
+	}
+	rows := strings.Split(strings.TrimSpace(out), "\n")
+	if len(rows) != 2 || !strings.HasPrefix(rows[1], want) || !strings.Contains(rows[1], "Numeric") {
+		t.Errorf("ls printed:\n%s\nwant the session's row dated %s", out, want)
 	}
 }

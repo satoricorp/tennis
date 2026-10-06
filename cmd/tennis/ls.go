@@ -179,16 +179,32 @@ func attrDate(attrs map[string]any, key string) string {
 	if raw == nil {
 		raw = attrs["modified"]
 	}
+	if t, ok := attrTime(raw); ok {
+		return t.Local().Format("2006-01-02 15:04")
+	}
+	if s, ok := raw.(string); ok {
+		return truncate(s, 16)
+	}
+	return ""
+}
+
+// attrTime reads a timestamp attribute: RFC3339 or a bare date, as every
+// importer writes them, or a number of Unix seconds, which add --ndjson takes
+// as given. A number comes back as float64 from decoded JSON, but a whole one
+// comes back as int64 from SQLite itself, which is how ls's grouped rows carry
+// the date they are sorted by; reading only float64 left those dates blank.
+func attrTime(raw any) (time.Time, bool) {
 	switch v := raw.(type) {
 	case string:
 		for _, layout := range []string{time.RFC3339, "2006-01-02"} {
 			if t, err := time.Parse(layout, v); err == nil {
-				return t.Local().Format("2006-01-02 15:04")
+				return t, true
 			}
 		}
-		return truncate(v, 16)
 	case float64:
-		return time.Unix(int64(v), 0).Format("2006-01-02 15:04")
+		return time.Unix(int64(v), 0), true
+	case int64:
+		return time.Unix(v, 0), true
 	}
-	return ""
+	return time.Time{}, false
 }
