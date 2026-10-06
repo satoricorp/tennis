@@ -8,7 +8,6 @@ import (
 	"io/fs"
 	"os"
 	"os/exec"
-	"path"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -244,19 +243,31 @@ func TestExternalReaders(t *testing.T) {
 	})
 }
 
+// withIgnoreCase sets whether .gitignore patterns ignore case for one test.
+func withIgnoreCase(t *testing.T, on bool) {
+	t.Helper()
+	was := ignoreCase
+	ignoreCase = on
+	t.Cleanup(func() { ignoreCase = was })
+}
+
 // The .gitignore patterns people write, read the way git reads them: a bare
 // name matches at any depth, a slash anchors it, a trailing slash means
 // folders only, ** spans folders, the last match wins — a deeper file's over
 // a shallower one's — and nothing inside an ignored folder comes back.
 func TestGitignore(t *testing.T) {
+	withIgnoreCase(t, false)
 	fsys := fstest.MapFS{
-		".gitignore": {Data: []byte("# what the build leaves\n*.log\n!keep.log\n/generated\ncoverage/\n" +
-			"docs/**/draft-*.md\nsecret[0-9].txt\n*.tmp   \n\\#scratch.md\n\n")},
+		".gitignore": {Data: []byte("\ufeff/first.txt\n# what the build leaves\n*.log\n!keep.log\n/generated\ncoverage/\n" +
+			"docs/**/draft-*.md\nsecret[0-9].txt\n*.tmp   \n\\#scratch.md\n\n" +
+			"v[[:digit:]][[:digit:]].txt\n[[:alpha:]]_*.csv\nsp[[:space:]]ce.md\n[[:upper:]]x.md\n[!z-a]q.md\n")},
 		"sub/.gitignore":       {Data: []byte("local.md\r\n!debug.log\r\n")},
 		"generated/.gitignore": {Data: []byte("!api.go\n")},
 	}
 	want := map[string]string{
+		"first.txt":            "first.txt", // after a byte-order mark
 		"app.log":              "app.log",
+		"ERROR.LOG":            "", // case counts, unless git is told otherwise
 		"keep.log":             "",
 		"sub/deep/trace.log":   "sub/deep/trace.log",
 		"sub/debug.log":        "",
@@ -274,28 +285,22 @@ func TestGitignore(t *testing.T) {
 		"secretx.txt":          "",
 		"notes.tmp":            "notes.tmp",
 		"#scratch.md":          "#scratch.md",
+		"v12.txt":              "v12.txt",
+		"v1a.txt":              "",
+		"q_2026.csv":           "q_2026.csv",
+		"2_2026.csv":           "",
+		"sp ce.md":             "sp ce.md",
+		"spxce.md":             "",
+		"Ax.md":                "Ax.md",
+		"ax.md":                "",
+		"bq.md":                "bq.md", // [z-a] holds z alone, so [!z-a] is all else
+		"zq.md":                "",
 		"README.md":            "",
 	}
 	for p := range want {
 		fsys[p] = &fstest.MapFile{Data: []byte("x")}
 	}
-
-	ig := newIgnores(fsys)
-	got := map[string]string{}
-	err := fs.WalkDir(fsys, ".", func(p string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		if d.IsDir() {
-			ig.dir(p)
-		} else if path.Base(p) != ".gitignore" {
-			got[p] = ig.file(p)
-		}
-		return nil
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
+	got := ignoredIn(t, fsys)
 	for p, w := range want {
 		if got[p] != w {
 			t.Errorf("%s: ignored by %q, want %q", p, got[p], w)
@@ -303,14 +308,142 @@ func TestGitignore(t *testing.T) {
 	}
 }
 
-// A pattern the matcher cannot follow is dropped on its own; the rest of the
-// file still applies.
-func TestGitignoreSurvivesABadPattern(t *testing.T) {
-	g := parseGitignore(".", []byte("[z-a]\n*.log\n[unclosed\n"))
-	if len(g.rules) != 2 {
-		t.Fatalf("got %d rules, want the two that make sense", len(g.rules))
+// ignoredIn walks fsys as add does and says, for every file, what ignores
+// it.
+func ignoredIn(t *testing.T, fsys fs.FS) map[string]string {
+	t.Helper()
+	ig := newIgnores(fsys)
+	got := map[string]string{}
+	err := fs.WalkDir(fsys, ".", func(p string, d fs.DirEntry, err error) error {
+		switch {
+		case err != nil:
+			return err
+		case d.IsDir() && d.Name() == ".git":
+			return fs.SkipDir
+		case d.IsDir():
+			ig.dir(p)
+		default:
+			got[p] = ig.file(p)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
 	}
-	if !g.rules[0].re.MatchString("x.log") || !g.rules[1].re.MatchString("[unclosed") {
-		t.Errorf("rules: %v, %v", g.rules[0].re, g.rules[1].re)
+	return got
+}
+
+// On a Mac, git makes a repository ignore case, so "*.log" covers ERROR.LOG
+// there.
+func TestGitignoreIgnoresCaseOnAMac(t *testing.T) {
+	if want := runtime.GOOS == "darwin"; ignoreCase != want {
+		t.Errorf("ignoreCase is %v on %s, want %v", ignoreCase, runtime.GOOS, want)
+	}
+	withIgnoreCase(t, true)
+	g := parseGitignore(".", []byte("*.log\nBuild/\n"))
+	for _, name := range []string{"ERROR.LOG", "error.log", "Error.Log"} {
+		if !g.rules[0].re.MatchString(name) {
+			t.Errorf("*.log should match %s where case is ignored", name)
+		}
+	}
+	if !g.rules[1].re.MatchString("build") {
+		t.Error("Build/ should match build where case is ignored")
+	}
+}
+
+// A pattern git can match nothing with — a bracket left open, a class with
+// no such name, a backslash with nothing to escape — matches nothing here
+// either, rather than its characters as themselves. The rest of the file
+// still applies.
+func TestGitignoreDropsWhatGitCannotMatch(t *testing.T) {
+	withIgnoreCase(t, false)
+	g := parseGitignore(".", []byte("[unclosed\n*.log\ntrail\\\n[[:nope:]]x\n[/]x\n[[:alpha:]\nkeep\\ \nspaced.md  \n"))
+	var kept []string
+	for _, r := range g.rules {
+		kept = append(kept, r.re.String())
+	}
+	if len(g.rules) != 3 {
+		t.Fatalf("kept %d rules, want *.log and the two spaced names: %q", len(g.rules), kept)
+	}
+	for i, name := range []string{"x.log", "keep ", "spaced.md"} {
+		if !g.rules[i].re.MatchString(name) {
+			t.Errorf("rule %d (%s) should match %q", i, g.rules[i].re, name)
+		}
+	}
+	if g.rules[2].re.MatchString("spaced.md  ") {
+		t.Error("trailing spaces are not part of a pattern unless escaped")
+	}
+}
+
+// TestGitignoreAgreesWithGit lays out a repository, asks git which of its
+// files are ignored, and checks the matcher names the same ones. git's own
+// config and global excludes are kept out, since a walk reads neither.
+func TestGitignoreAgreesWithGit(t *testing.T) {
+	gitPath, err := exec.LookPath("git")
+	if err != nil {
+		t.Skip("git is not installed")
+	}
+	dir := writeTree(t, map[string]string{
+		".gitignore": "\ufefffirst.txt\n# a comment\n*.log\n!keep.log\n/generated\ncoverage/\ndocs/**/draft-*.md\n" +
+			"**/cache/*.bin\nlogs/**\nsecret[0-9].txt\n*.tmp   \nkeep\\ \n\\#scratch.md\n\\!bang.md\n" +
+			"file[[:digit:]].txt\n[[:alpha:]]x.md\nsp[[:space:]]c.md\n[[:upper:]]w.md\n[[:punct:]]p.md\n" +
+			"[!z-a]q.md\n[z-a]r.md\n[]]b.md\n[^a]n.md\n[a-c]g.md\n" +
+			"[unclosed\ntrail\\\n[[:foo:]]bad.md\n[[:alpha:]\n",
+		"sub/.gitignore":       "/local.md\r\n!debug.log\r\nnested/\r\n",
+		"generated/.gitignore": "!api.go\n",
+	})
+	for _, name := range []string{
+		"first.txt", "ERROR.LOG", "app.log", "keep.log", "sub/debug.log", "sub/x/trace.log",
+		"sub/local.md", "sub/deep/local.md", "local.md", "sub/nested/n.md", "nested/n.md",
+		"generated/api.go", "src/generated/api.go", "coverage/index.html", "coverage/lcov/report.txt",
+		"docs/draft-1.md", "docs/a/b/draft-2.md", "docs/final.md", "a/cache/x.bin", "cache/y.bin", "a/cache/x.txt",
+		"logs/today/x.txt", "secret1.txt", "secretx.txt", "notes.tmp", "keep ", "keep", "#scratch.md", "!bang.md",
+		"file1.txt", "filex.txt", "ax.md", "1x.md", "sp c.md", "spxc.md", "Aw.md", "bw.md", "_p.md", "ap.md",
+		"bq.md", "zq.md", "zr.md", "ar.md", "]b.md", "ab.md", "bn.md", "an.md", "Bg.md", "dg.md",
+		"[unclosed", "trail", "trail\\", "bad.md", "fbad.md", "README.md",
+	} {
+		p := filepath.Join(dir, filepath.FromSlash(name))
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	home := t.TempDir()
+	git := func(args ...string) (string, error) {
+		cmd := exec.Command(gitPath, append([]string{"-C", dir}, args...)...)
+		cmd.Env = append(os.Environ(), "HOME="+home, "XDG_CONFIG_HOME="+home, "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL="+os.DevNull)
+		out, err := cmd.Output()
+		return string(out), err
+	}
+	if out, err := git("init", "-q", "--template="); err != nil {
+		t.Fatalf("git init: %v %s", err, out)
+	}
+	// git decides whether case matters when it makes the repository, by
+	// looking at the filesystem; the matcher is held to the same answer.
+	folds, _ := git("config", "--bool", "core.ignorecase")
+	withIgnoreCase(t, strings.TrimSpace(folds) == "true")
+	out, err := git("ls-files", "-o", "-i", "--exclude-standard", "-z")
+	if err != nil {
+		t.Fatalf("git ls-files: %v", err)
+	}
+	byGit := map[string]bool{}
+	for _, p := range strings.Split(out, "\x00") {
+		if p != "" {
+			byGit[p] = true
+		}
+	}
+	if len(byGit) < 20 {
+		t.Fatalf("git ignores only %d files, which is not the fixture: %v", len(byGit), sortedKeys(byGit))
+	}
+	for p, why := range ignoredIn(t, os.DirFS(dir)) {
+		if (why != "") != byGit[p] {
+			t.Errorf("%q: git ignores it: %v; tennis ignores it: %v (%q)", p, byGit[p], why != "", why)
+		}
+		delete(byGit, p)
+	}
+	for p := range byGit {
+		t.Errorf("%q: git ignores a file the walk never saw", p)
 	}
 }

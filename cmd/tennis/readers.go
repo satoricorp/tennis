@@ -22,6 +22,7 @@ import (
 	"sync"
 	"time"
 	"unicode/utf16"
+	"unicode/utf8"
 )
 
 // What add reads. A file is text if its bytes are, whatever its extension;
@@ -536,7 +537,7 @@ func plistUnescape(s string) string {
 // folder it was given — not those above it, nor git's global excludes — with
 // git's rules for the patterns people write: comments, "!" to re-include, a
 // trailing slash for folders only, a leading or inner slash to anchor a
-// pattern to its file's folder, and *, ?, [a-z] and ** as globs.
+// pattern to its file's folder, and *, ?, [a-z], [[:digit:]] and ** as globs.
 
 // gitignore is one .gitignore file: its patterns, in order, and the folder
 // they are relative to.
@@ -552,13 +553,27 @@ type ignoreRule struct {
 	dirOnly bool // a trailing "/": folders only
 }
 
+// ignoreCase is whether a pattern matches a name whatever its case. git
+// keeps this per repository, as core.ignorecase, and turns it on when it
+// makes a repository on a filesystem that cannot tell README from readme —
+// which a Mac's is, unless someone chose otherwise when formatting it. In
+// such a repository "*.log" ignores ERROR.LOG, and a walk that read
+// ERROR.LOG anyway would index what git keeps out. A folder need not be a
+// repository for its .gitignore to be read, so there is no config to ask;
+// the operating system stands in for the filesystem.
+var ignoreCase = runtime.GOOS == "darwin"
+
 func parseGitignore(dir string, body []byte) gitignore {
 	g := gitignore{dir: dir}
+	// git skips the byte-order mark some editors begin a file with; read as
+	// part of the first pattern, it would keep that pattern from matching.
+	body = bytes.TrimPrefix(body, []byte("\ufeff"))
+	flags := ""
+	if ignoreCase {
+		flags = "(?i)"
+	}
 	for _, line := range strings.Split(string(body), "\n") {
-		line = strings.TrimSuffix(line, "\r")
-		for strings.HasSuffix(line, " ") && !strings.HasSuffix(line, `\ `) {
-			line = line[:len(line)-1]
-		}
+		line = trimTrailingSpaces(strings.TrimSuffix(line, "\r"))
 		if line == "" || line[0] == '#' {
 			continue
 		}
@@ -574,7 +589,11 @@ func parseGitignore(dir string, body []byte) gitignore {
 		if line == "" {
 			continue
 		}
-		re, err := regexp.Compile("^" + globRegexp(line) + "$")
+		glob, ok := globRegexp(line)
+		if !ok {
+			continue // git matches nothing with it, and neither does this
+		}
+		re, err := regexp.Compile(flags + "^" + glob + "$")
 		if err != nil {
 			// A pattern this reader cannot follow is one git may well
 			// honour; leaving it out reads a file git would not, which is
@@ -587,9 +606,37 @@ func parseGitignore(dir string, body []byte) gitignore {
 	return g
 }
 
+// trimTrailingSpaces drops the spaces a pattern ends with, as git does,
+// unless a backslash keeps one: "a\ " ends in a space, "a\\ " does not.
+func trimTrailingSpaces(s string) string {
+	from := -1 // where the run of spaces at the end begins
+	for i := 0; i < len(s); i++ {
+		switch s[i] {
+		case ' ':
+			if from < 0 {
+				from = i
+			}
+		case '\\':
+			if i++; i == len(s) {
+				return s
+			}
+			from = -1
+		default:
+			from = -1
+		}
+	}
+	if from >= 0 {
+		return s[:from]
+	}
+	return s
+}
+
 // globRegexp turns a gitignore glob into a regular expression. * and ? stay
-// within one name; ** as a whole segment spans any number of folders.
-func globRegexp(glob string) string {
+// within one name; ** as a whole segment spans any number of folders. ok is
+// false for a glob git can match nothing with — a bracket never closed, a
+// class with no such name, a backslash with nothing after it to escape —
+// rather than reading the stray character as itself.
+func globRegexp(glob string) (re string, ok bool) {
 	var b strings.Builder
 	for i := 0; i < len(glob); i++ {
 		switch c := glob[i]; c {
@@ -611,47 +658,121 @@ func globRegexp(glob string) string {
 		case '[':
 			class, n := globClass(glob[i:])
 			if n == 0 {
-				b.WriteString(`\[`)
-				continue
+				return "", false
 			}
 			b.WriteString(class)
 			i += n - 1
 		case '\\':
-			if i+1 < len(glob) {
-				i++
+			if i+1 == len(glob) {
+				return "", false
 			}
+			i++
 			b.WriteString(regexp.QuoteMeta(glob[i : i+1]))
 		default:
 			b.WriteString(regexp.QuoteMeta(glob[i : i+1]))
 		}
 	}
-	return b.String()
+	return b.String(), true
+}
+
+// posixClasses are the classes git knows by name in a bracket — [[:digit:]],
+// [[:space:]] — as Go spells them. A bracket never matches the "/" between
+// folders, so the three that take it in are spelled out without it.
+var posixClasses = map[string]string{
+	"alnum": `[:alnum:]`, "alpha": `[:alpha:]`, "blank": `[:blank:]`,
+	"cntrl": `[:cntrl:]`, "digit": `[:digit:]`, "lower": `[:lower:]`,
+	"space": `[:space:]`, "upper": `[:upper:]`, "xdigit": `[:xdigit:]`,
+	"punct": `\x{21}-\x{2e}\x{3a}-\x{40}\x{5b}-\x{60}\x{7b}-\x{7e}`,
+	"graph": `\x{21}-\x{2e}\x{30}-\x{7e}`,
+	"print": `\x{20}-\x{2e}\x{30}-\x{7e}`,
 }
 
 // globClass translates the bracket expression s starts with — [abc], [a-z],
-// [!a-z] — and says how many bytes of s it took; 0 means it is unclosed, and
-// the bracket is only a bracket.
+// [!a-z], [[:alpha:]_] — the way git's wildmatch reads one, and says how
+// many bytes of s it took. 0 means the glob it is in can match nothing: the
+// bracket is never closed, names a class git has no name for, or holds
+// nothing but "/". As in git, a "]" first in the bracket is itself, a range
+// written backwards holds only its first character, and "[:" without a
+// closing ":]" is an ordinary "[".
 func globClass(s string) (string, int) {
 	var b strings.Builder
 	b.WriteByte('[')
 	i := 1
-	if i < len(s) && (s[i] == '!' || s[i] == '^') {
+	negated := i < len(s) && (s[i] == '!' || s[i] == '^')
+	if negated {
 		b.WriteString("^/")
 		i++
 	}
-	for first := true; i < len(s); i, first = i+1, false {
-		switch c := s[i]; {
-		case c == ']' && !first:
+	members := 0
+	add := func(lo, hi rune) {
+		// Every character is written as a code point, so none is special.
+		for _, r := range [][2]rune{{lo, min(hi, '/'-1)}, {max(lo, '/'+1), hi}} {
+			if r[0] > r[1] {
+				continue
+			}
+			if r[0] == r[1] {
+				fmt.Fprintf(&b, `\x{%x}`, r[0])
+			} else {
+				fmt.Fprintf(&b, `\x{%x}-\x{%x}`, r[0], r[1])
+			}
+			members++
+		}
+	}
+	// next reads the character at s[i], or the one a backslash escapes.
+	next := func() (rune, bool) {
+		if s[i] == '\\' {
+			if i++; i == len(s) {
+				return 0, false
+			}
+		}
+		r, size := utf8.DecodeRuneInString(s[i:])
+		i += size
+		return r, true
+	}
+
+	prev := rune(-1) // the last lone character, where a "-" starts a range
+	for first := true; i < len(s); first = false {
+		switch {
+		case s[i] == ']' && !first:
+			if members == 0 && !negated {
+				return "", 0
+			}
 			b.WriteByte(']')
 			return b.String(), i + 1
-		case c == '\\' && i+1 < len(s):
+		case s[i] == '-' && prev >= 0 && i+1 < len(s) && s[i+1] != ']':
 			i++
-			b.WriteString(regexp.QuoteMeta(s[i : i+1]))
-		case c == '\\' || c == '[' || c == ']' || c == '^':
-			b.WriteByte('\\')
-			b.WriteByte(c)
+			hi, ok := next()
+			if !ok {
+				return "", 0
+			}
+			add(prev, hi)
+			prev = -1
+		case strings.HasPrefix(s[i:], "[:"):
+			end := strings.IndexByte(s[i+2:], ']')
+			if end < 0 {
+				return "", 0
+			}
+			if name, isClass := strings.CutSuffix(s[i+2:i+2+end], ":"); end > 0 && isClass {
+				class, known := posixClasses[name]
+				if !known {
+					return "", 0
+				}
+				b.WriteString(class)
+				members++
+				prev = -1
+				i += 2 + end + 1
+				continue
+			}
+			add('[', '[')
+			prev = '['
+			i++
 		default:
-			b.WriteByte(c)
+			r, ok := next()
+			if !ok {
+				return "", 0
+			}
+			add(r, r)
+			prev = r
 		}
 	}
 	return "", 0
