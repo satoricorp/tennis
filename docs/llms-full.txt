@@ -253,13 +253,14 @@ tennis search "auth" --where 'status=merged'       # filter by attribute
 tennis search "auth" --where 'cost>5,status!=failed'
 tennis search "auth" --ns work
 tennis search "auth" --json
+tennis search --where 'session=<id>'               # read a whole conversation, no query
 ```
 
 | Flag | Meaning |
 |---|---|
 | `-k <n>` | how many results (default 1; `-n` is an alias) |
 | `--mode <mode>` | `hybrid` (default), `keyword`, `semantic` |
-| `--where <filter>` | attribute filter: `key=value`, `key>value`, `key!=value`, comma-separated |
+| `--where <filter>` | attribute filter: `key=value`, `key>value`, `key!=value`, comma-separated; with no query, prints every match in full |
 | `--ns <name>` | namespace (default `context`, or `$TENNIS_NS`) |
 | `--db <path>` | database file |
 | `--json` | full results with scores and attributes |
@@ -332,6 +333,31 @@ That is `--mode keyword` doing its job: no document contains the word *signed*, 
 ```
 
 `keyword_rank: 0` means BM25 did not return this document at all — the ranks are 1-based, and `0` is "absent", not "first".
+
+### Reading, not ranking
+
+Given a `--where` filter and no query, `search` stops ranking and prints every match in full. This is the command at the foot of every [card](/cards): `--where 'session=<id>'` prints the whole conversation, `--where 'path=<file>'` the file's text exactly as it was indexed.
+
+```bash
+$ tennis search --where 'session=7f3a2c10-1b2e-4d5f-9a8b-0c1d2e3f4a5b'
+# Flaky auth test: token refresh window
+
+## summary
+
+Flaky auth test: token refresh window
+
+## user
+
+The auth test fails about one run in five. Can you find out why?
+
+## assistant
+
+The token refresh window is shorter than the test's sleep, so the second request runs with an expired token.
+
+I widened the window and added a regression test.
+```
+
+A conversation is printed in turn order under its title, with back-to-back turns from one speaker merged — the same rendering the summarizer reads. A filter that matches several sessions prints each one whole, one after another, never interleaved. `--json` returns the matching documents as `[{"id", "text", "attributes"}]` in the same order. `-k` caps how many documents print, but only when you pass it; the default of 1 is for ranked results. A filter that matches nothing prints `no matches`, and `search` with neither a query nor a filter is still a usage error.
 
 ## tennis ls
 
@@ -630,7 +656,7 @@ tennis search "the timeout" --where source=codex
 tennis ls --where branch=main
 ```
 
-A card's last line is the filter that pulls up its whole conversation: `tennis search --where 'session=<id>'`.
+A card's last line is the filter that pulls up its whole conversation: `tennis search --where 'session=<id>'`. With a filter and no query, `search` prints every match in full and in order rather than ranking anything — see [Reading, not ranking](/cli#reading-not-ranking).
 
 Filters run before ranking, so a filtered query is faster than an unfiltered one.
 
@@ -699,7 +725,7 @@ expired token. The window was widened and a regression test added.
 Full conversation: `tennis search --where 'session=7f3a2c10-1b2e-4d5f-9a8b-0c1d2e3f4a5b'`
 ```
 
-The frontmatter carries what the import knew: the document-id prefix as `session`, the `source`, the `title`, when it was `created`, how many `turns` it ran, and for local agent sessions the `project`, `cwd`, and `branch` when the transcript recorded them. The last line is how to get the rest — the card's whole job is to be readable on its own and to say where the full record lives.
+The frontmatter carries what the import knew: the document-id prefix as `session`, the `source`, the `title`, when it was `created`, how many `turns` it ran, and for local agent sessions the `project`, `cwd`, and `branch` when the transcript recorded them. The last line is how to get the rest: run it and `search` prints the whole conversation, turn by turn (see [Reading, not ranking](/cli#reading-not-ranking)). The card's whole job is to be readable on its own and to say where the full record lives.
 
 The filename is the UTC timestamp, the source, and a slug of the title: `2026-08-01-100000-claude-code-flaky-auth-test-token-refresh-window.md`. Claude Code names a session several turns in, so importing twice can produce two titles for one conversation; the timestamp-and-source prefix is stable, and a re-import replaces the older card rather than leaving both.
 
@@ -727,7 +753,7 @@ Full text: `tennis search --where 'path=/Users/you/Documents/notes/auth.md'`
 
 That one was written without an API key, so in place of a summary it carries the file's first lines, fenced so a spreadsheet's rows stay rows. With a key, it is a few sentences of prose like a conversation's.
 
-The frontmatter is the file's: its absolute path as `file`, `source: file`, its name as the `title`, when it was last `modified`, and its `size` in bytes. The last line is the filter that pulls up the text Tennis indexed.
+The frontmatter is the file's: its absolute path as `file`, `source: file`, its name as the `title`, when it was last `modified`, and its `size` in bytes. The last line prints the text Tennis indexed for it, exactly as it was read.
 
 The filename is a slug of the file's name and the first eight hex digits of a SHA-256 of its path: `auth-md-3f9e328a.md`. Nothing in it depends on the file's contents or dates, so re-adding a folder after editing a file updates that file's card in place, and the hash keeps two `notes.md` in different folders apart. A file that moves or is renamed gets a new card; the old one stays until you delete it.
 

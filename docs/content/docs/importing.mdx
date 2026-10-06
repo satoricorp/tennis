@@ -84,7 +84,7 @@ tennis search "the timeout" --where source=codex
 tennis ls --where branch=main
 ```
 
-A card's last line is the filter that pulls up its whole conversation: `tennis search --where 'session=<id>'`.
+A card's last line is the filter that pulls up its whole conversation: `tennis search --where 'session=<id>'`. With a filter and no query, `search` prints every match in full and in order rather than ranking anything — see [Reading, not ranking](/cli#reading-not-ranking).
 
 Filters run before ranking, so a filtered query is faster than an unfiltered one.
 
