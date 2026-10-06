@@ -269,3 +269,105 @@ func TestOpenAIRequestShape(t *testing.T) {
 		t.Fatalf("sent %d messages, want a system turn and a user turn", len(msgs))
 	}
 }
+
+// TestTruncatedSummaryKeepsWholeSentences: a model that runs out of tokens
+// still answers 200, and a card with a summary on it is final. Kept as it
+// came, the sentence it broke off in the middle of would stay on the card
+// until what it describes changed. What came before it is kept; a summary
+// with no whole sentence is an error, so the card falls back and is tried
+// again on the next import.
+func TestTruncatedSummaryKeepsWholeSentences(t *testing.T) {
+	const cut = `Rotated the signing key with kid headers. The old key stays valid for "a day." Left open: whether the refresh tok`
+	const kept = `Rotated the signing key with kid headers. The old key stays valid for "a day."`
+
+	providers := []struct {
+		name  string
+		reply func(text string, truncated bool) string
+		new   func(url string, c *http.Client) Summarizer
+	}{
+		{"anthropic", func(text string, truncated bool) string {
+			stop := "end_turn"
+			if truncated {
+				stop = "max_tokens"
+			}
+			raw, _ := json.Marshal(map[string]any{
+				"content":     []map[string]string{{"type": "text", "text": text}},
+				"stop_reason": stop,
+			})
+			return string(raw)
+		}, func(url string, c *http.Client) Summarizer {
+			return &anthropic{key: "k", model: "m", client: c, baseURL: url}
+		}},
+		{"openai", func(text string, truncated bool) string {
+			finish := "stop"
+			if truncated {
+				finish = "length"
+			}
+			raw, _ := json.Marshal(map[string]any{
+				"choices": []map[string]any{{"message": map[string]string{"content": text}, "finish_reason": finish}},
+			})
+			return string(raw)
+		}, func(url string, c *http.Client) Summarizer {
+			return &openai{key: "k", model: "m", client: c, baseURL: url}
+		}},
+	}
+	for _, p := range providers {
+		t.Run(p.name, func(t *testing.T) {
+			var (
+				text      string
+				truncated bool
+				calls     int
+			)
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				calls++
+				io.WriteString(w, p.reply(text, truncated))
+			}))
+			defer srv.Close()
+			sum := p.new(srv.URL, srv.Client())
+			run := func(body string, cutOff bool) (string, error) {
+				text, truncated, calls = body, cutOff, 0
+				return sum.Summarize(context.Background(), in("hi"))
+			}
+
+			if got, err := run(cut, true); err != nil || got != kept {
+				t.Errorf("cut off mid-sentence: got %q, %v; want %q", got, err, kept)
+			}
+			if _, err := run("Rotated the signing key with kid", true); !errors.Is(err, ErrTruncated) {
+				t.Errorf("cut off in the first sentence: err = %v, want ErrTruncated", err)
+			}
+			if calls != 1 {
+				t.Errorf("made %d calls for a cut-off summary, want 1: asking again spends the same tokens", calls)
+			}
+			// A summary that finished is kept whole, even one that ends
+			// without a full stop.
+			if got, err := run("Rotated the key. Nothing left open", false); err != nil || got != "Rotated the key. Nothing left open" {
+				t.Errorf("a finished summary was trimmed: got %q, %v", got, err)
+			}
+		})
+	}
+}
+
+// TestCompleteFindsSentenceEnds: what ends a sentence, and what only looks as
+// if it might.
+func TestCompleteFindsSentenceEnds(t *testing.T) {
+	for _, c := range []struct{ in, want string }{
+		{"Done. Then", "Done."},
+		{"Is it? Yes! And", "Is it? Yes!"},
+		{"Ends here.", "Ends here."},
+		{"Rent rose to 3.5 percent. The deposit was", "Rent rose to 3.5 percent."},
+		{"Rent rose to 3.5 percent", ""},
+		{"See the README (it says so.) Then", "See the README (it says so.)"},
+		{"Line one.\nLine two", "Line one."},
+	} {
+		got, err := complete(c.in)
+		if c.want == "" {
+			if !errors.Is(err, ErrTruncated) {
+				t.Errorf("complete(%q) = %q, %v; want ErrTruncated", c.in, got, err)
+			}
+			continue
+		}
+		if err != nil || got != c.want {
+			t.Errorf("complete(%q) = %q, %v; want %q", c.in, got, err, c.want)
+		}
+	}
+}

@@ -34,6 +34,12 @@ var ErrNoKey = errors.New("no LLM API key found")
 // of several hundred should cost that card its prose, not abort the run.
 var ErrRefused = errors.New("model declined to summarize")
 
+// ErrTruncated reports that the model ran out of tokens before it finished its
+// first sentence, so there is nothing whole to keep. The card falls back to
+// the opening and carries no summarizer line, which is what tells the next
+// import to try again.
+var ErrTruncated = errors.New("summary was cut off before its first sentence ended")
+
 // Defaults. Both are overridable with TENNIS_SUMMARY_MODEL, which is the lever
 // for anyone summarizing a large backlog who would rather trade some quality
 // for cost — a first collection can be hundreds of conversations.
@@ -188,6 +194,43 @@ func alignRune(s string, i int) int {
 	return i
 }
 
+// complete keeps a summary the model was cut off writing, up to the end of its
+// last whole sentence. A card is final once it carries a summary, so a
+// sentence broken off mid-word would stay on it until what it describes
+// changed; the sentences before it are worth keeping, and a summary with none
+// is an error, so the card is tried again on the next import.
+//
+// A sentence ends at a full stop, question mark, or exclamation mark followed
+// by whitespace or the end of the text, allowing for a closing quote or
+// bracket in between. A decimal point is followed by a digit, so "3.5" does
+// not end one.
+func complete(s string) (string, error) {
+	end := -1
+	for i := 0; i < len(s); i++ {
+		if s[i] != '.' && s[i] != '!' && s[i] != '?' {
+			continue
+		}
+		j := i + 1
+		for j < len(s) && strings.ContainsRune(closers, rune(s[j])) {
+			j++
+		}
+		if j < len(s) && !isSpace(s[j]) {
+			continue
+		}
+		end = j
+	}
+	if end < 0 {
+		return "", ErrTruncated
+	}
+	return strings.TrimSpace(s[:end]), nil
+}
+
+// closers may sit between a sentence's last mark and the space after it. All
+// are ASCII, so the byte scan in complete can step over them.
+const closers = `"')]`
+
+func isSpace(b byte) bool { return b == ' ' || b == '\n' || b == '\t' || b == '\r' }
+
 func truncateWords(s string, n int) string {
 	fields := strings.Fields(s)
 	if len(fields) <= n {
@@ -333,7 +376,14 @@ func (a *anthropic) Summarize(ctx context.Context, in Input) (string, error) {
 		if len(out) == 0 {
 			return "", false, fmt.Errorf("anthropic returned no text")
 		}
-		return strings.TrimSpace(strings.Join(out, "\n")), false, nil
+		text := strings.TrimSpace(strings.Join(out, "\n"))
+		if parsed.StopReason == "max_tokens" {
+			text, err = complete(text)
+			if err != nil {
+				return "", false, err
+			}
+		}
+		return text, false, nil
 	})
 }
 
@@ -364,6 +414,7 @@ type openaiChatResponse struct {
 		Message struct {
 			Content string `json:"content"`
 		} `json:"message"`
+		FinishReason string `json:"finish_reason"`
 	} `json:"choices"`
 	Error *struct {
 		Message string `json:"message"`
@@ -403,6 +454,13 @@ func (o *openai) Summarize(ctx context.Context, in Input) (string, error) {
 		if len(parsed.Choices) == 0 || strings.TrimSpace(parsed.Choices[0].Message.Content) == "" {
 			return "", false, fmt.Errorf("openai returned no text")
 		}
-		return strings.TrimSpace(parsed.Choices[0].Message.Content), false, nil
+		text := strings.TrimSpace(parsed.Choices[0].Message.Content)
+		if parsed.Choices[0].FinishReason == "length" {
+			text, err = complete(text)
+			if err != nil {
+				return "", false, err
+			}
+		}
+		return text, false, nil
 	})
 }
