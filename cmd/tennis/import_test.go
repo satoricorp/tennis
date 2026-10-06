@@ -786,3 +786,98 @@ func TestClaudeCodeNumericTimestampBecomesADate(t *testing.T) {
 		t.Errorf("epoch milliseconds should become an RFC3339 date, got %q", got)
 	}
 }
+
+// A path that fails after one that succeeded must not cost the first its
+// documents. The sink batches writes and the card writer runs ahead of it, so
+// returning on the first path error used to leave cards in ~/tennis for
+// conversations the database never received — a re-run was the only way to
+// make them searchable. Now what was read goes in, the report covers it, and
+// the error is what main exits nonzero on.
+func TestAddKeepsEarlierPathsWhenALaterOneFails(t *testing.T) {
+	cache := ndjsonTestCache(t)
+	t.Setenv("TENNIS_CACHE", cache)
+	cardDir := t.TempDir()
+	t.Setenv("TENNIS_CARDS", cardDir)
+	dbPath := filepath.Join(t.TempDir(), "add.sqlite")
+	const ns = "lost"
+
+	good := writeZip(t, "claude-export.zip", map[string]string{"conversations.json": claudeExport})
+	// Nothing in here is indexable: detection falls through to plain files,
+	// and a plain-files import that finds none is an error.
+	bad := t.TempDir()
+	if err := os.WriteFile(filepath.Join(bad, "readme.rst"), []byte("nothing indexable here"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	out, err := captureStdout(t, func() error {
+		return cmdAdd([]string{"--db", dbPath, "--json", "--ns", ns, good, bad})
+	})
+	if err == nil {
+		t.Fatal("a path that imports nothing must still fail the command")
+	}
+	if !strings.Contains(err.Error(), "no indexable files") {
+		t.Errorf("the error should be the bad path's, got %q", err)
+	}
+
+	// The report describes what landed — the good path alone — and names the
+	// failure, so stdout on its own does not read as a clean run.
+	res := decodeImportResult(t, out)
+	if res["written"] != float64(2) {
+		t.Errorf("written: want the good path's 2, got %v", res["written"])
+	}
+	sources, _ := res["sources"].([]any)
+	if len(sources) != 1 {
+		t.Fatalf("sources should list the good path alone, got %v", res["sources"])
+	}
+	if src := sources[0].(map[string]any); src["path"] != good {
+		t.Errorf("source path: %v, want %s", src["path"], good)
+	}
+	if msg, _ := res["error"].(string); !strings.Contains(msg, "no indexable files") {
+		t.Errorf("the report should carry the error, got %v", res["error"])
+	}
+
+	// In the database, not just in the report.
+	out, err = captureStdout(t, func() error {
+		return cmdLS([]string{"--db", dbPath, "--json", "--docs", "--ns", ns})
+	})
+	if err != nil {
+		t.Fatalf("ls: %v\noutput: %s", err, out)
+	}
+	var docs []map[string]any
+	if err := json.Unmarshal([]byte(out), &docs); err != nil {
+		t.Fatalf("ls --json did not parse: %v\noutput: %s", err, out)
+	}
+	if len(docs) != 2 {
+		t.Errorf("ls --docs: got %d documents, want the good path's 2: %v", len(docs), docs)
+	}
+
+	// And every card on disk describes a conversation that is actually there.
+	cards, _ := filepath.Glob(filepath.Join(cardDir, "*.md"))
+	if len(cards) != 1 {
+		t.Errorf("cards: got %d, want 1 for the one conversation imported: %v", len(cards), cards)
+	}
+}
+
+// The other way round — the bad path first, nothing read before it — is the
+// plain error it always was, with no report in front of it: an "imported 0"
+// line would dress the mistake up as a partial success.
+func TestAddBadOnlyPathPrintsNoReport(t *testing.T) {
+	cache := ndjsonTestCache(t)
+	t.Setenv("TENNIS_CACHE", cache)
+	t.Setenv("TENNIS_CARDS", t.TempDir())
+	dbPath := filepath.Join(t.TempDir(), "add.sqlite")
+
+	bad := t.TempDir()
+	if err := os.WriteFile(filepath.Join(bad, "readme.rst"), []byte("nothing indexable here"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	out, err := captureStdout(t, func() error {
+		return cmdAdd([]string{"--db", dbPath, "--json", "--ns", "lost", bad})
+	})
+	if err == nil {
+		t.Fatal("a lone path that imports nothing must fail the command")
+	}
+	if strings.TrimSpace(out) != "" {
+		t.Errorf("nothing was read, so nothing should be reported; stdout was %q", out)
+	}
+}

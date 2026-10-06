@@ -224,19 +224,39 @@ func runImport(nsName string, paths []string, o importOpts) error {
 	var (
 		reports []map[string]any
 		failed  int
+		pathErr error
 	)
 	for _, p := range paths {
 		rep, err := importPath(p, *format, granularity, *ext, sink, warn, *asJSON)
 		if err != nil {
-			return err
+			// A bad path ends the run, but not retroactively. The paths are
+			// independent of one another — the stat loop above already turned
+			// away the ones that do not exist — so what the earlier ones read
+			// is exactly as good as it would have been had this one not
+			// failed, and the card writer has been filing summaries for it the
+			// whole time. Returning from here with the batch unwritten would
+			// leave those cards in ~/tennis describing conversations the index
+			// never received. So the sink is flushed and the report printed
+			// below like any other, and the error is what the run exits on.
+			pathErr = err
+			break
 		}
 		failed += rep["failed"].(int)
 		reports = append(reports, rep)
 	}
 	if err := sink.flush(); err != nil {
+		if pathErr != nil {
+			return errors.Join(pathErr, err)
+		}
 		return err
 	}
 	sink.cards.close()
+
+	// Nothing read, nothing to report. An "imported 0" line ahead of the error
+	// would dress a one-path mistake up as a partial success.
+	if pathErr != nil && len(reports) == 0 && sink.count() == 0 {
+		return pathErr
+	}
 
 	if *asJSON {
 		out := map[string]any{
@@ -247,6 +267,11 @@ func runImport(nsName string, paths []string, o importOpts) error {
 		if sink.cards != nil {
 			out["cards"] = sink.cards.written
 			out["cards_unsummarized"] = sink.cards.failed
+		}
+		if pathErr != nil {
+			// sources lists only what went in, so without this a reader of
+			// stdout alone would see a clean run.
+			out["error"] = pathErr.Error()
 		}
 		if err := emit(out); err != nil {
 			return err
@@ -261,6 +286,9 @@ func runImport(nsName string, paths []string, o importOpts) error {
 			fmt.Printf(" (%d failed)", failed)
 		}
 		fmt.Println()
+	}
+	if pathErr != nil {
+		return pathErr
 	}
 	if failed > 0 {
 		return fmt.Errorf("%d item(s) failed to import", failed)

@@ -55,9 +55,10 @@ type cardWriter struct {
 	wg   sync.WaitGroup
 	ctx  context.Context
 
-	// close runs both at the end of a successful import and from a deferred
-	// safety net covering the error returns between here and there. Closing a
-	// channel twice panics, so which one gets there first must not matter.
+	// close runs both at the end of the import, including one cut short by a
+	// bad path, and from a deferred safety net covering the error returns
+	// between here and there. Closing a channel twice panics, so which one
+	// gets there first must not matter.
 	once sync.Once
 
 	mu      sync.Mutex
