@@ -1,9 +1,9 @@
 ---
 title: "Cards"
-description: "Every imported conversation also lands as a markdown card in ~/tennis — a readable copy, summarized when you have an API key."
+description: "Every conversation and every file add reads also lands as a markdown card in ~/tennis — a readable copy, summarized when you have an API key."
 ---
 
-Search answers a question. A card is for the other thing you do with history: read it. Every conversation `add` imports is written out as one markdown file, so a year of sessions becomes a folder you can open in any editor, grep, sync, or paste somewhere else.
+Search answers a question. A card is for the other thing you do with what you have indexed: read it. Every conversation and every file `add` reads is written out as one markdown file, so a year of sessions and a folder of documents become a folder of short summaries you can open in any editor, grep, sync, or paste somewhere else.
 
 ```bash
 $ tennis add ~/.claude
@@ -11,12 +11,20 @@ tennis: summarizing cards with anthropic:claude-opus-5
 tennis: /Users/you/.claude: reading Claude Code session transcripts
 imported 5, skipped 0 unchanged, 5 chunks in "context", 2 cards in /Users/you/tennis
 
+$ tennis add ~/Documents/notes
+tennis: summarizing cards with anthropic:claude-opus-5
+tennis: /Users/you/Documents/notes: reading plain files
+imported 3, skipped 0 unchanged, 3 chunks in "context", 3 cards in /Users/you/tennis
+
 $ ls ~/tennis
 2026-08-01-100000-claude-code-flaky-auth-test-token-refresh-window.md
 2026-08-03-093000-claude-code-toml-config-parser-with-defaults.md
+auth-md-3f9e328a.md
+config-md-d1305502.md
+retry-md-fc40188a.md
 ```
 
-## A card, in full
+## A conversation's card
 
 ```markdown
 ---
@@ -43,6 +51,34 @@ The frontmatter carries what the import knew: the document-id prefix as `session
 
 The filename is the UTC timestamp, the source, and a slug of the title: `2026-08-01-100000-claude-code-flaky-auth-test-token-refresh-window.md`. Claude Code names a session several turns in, so importing twice can produce two titles for one conversation; the timestamp-and-source prefix is stable, and a re-import replaces the older card rather than leaving both.
 
+## A file's card
+
+````markdown
+---
+file: /Users/you/Documents/notes/auth.md
+source: file
+title: auth.md
+modified: 2026-10-05T14:02:11Z
+size: 163
+---
+
+# auth.md
+
+```
+# Session handling
+Make the login flow remember the user between sessions. The session cookie is
+set with an expiry so the browser keeps it after the tab closes.
+```
+
+Full text: `tennis search --where 'path=/Users/you/Documents/notes/auth.md'`
+````
+
+That one was written without an API key, so in place of a summary it carries the file's first lines, fenced so a spreadsheet's rows stay rows. With a key, it is a few sentences of prose like a conversation's.
+
+The frontmatter is the file's: its absolute path as `file`, `source: file`, its name as the `title`, when it was last `modified`, and its `size` in bytes. The last line is the filter that pulls up the text Tennis indexed.
+
+The filename is a slug of the file's name and the first eight hex digits of a SHA-256 of its path: `auth-md-3f9e328a.md`. Nothing in it depends on the file's contents or dates, so re-adding a folder after editing a file updates that file's card in place, and the hash keeps two `notes.md` in different folders apart. A file that moves or is renamed gets a new card; the old one stays until you delete it.
+
 ## Where they go
 
 | | |
@@ -51,7 +87,7 @@ The filename is the UTC timestamp, the source, and a slug of the title: `2026-08
 | `$TENNIS_CARDS` | the same, from the environment |
 | `--no-cards` | write none |
 
-The default is `~/tennis`. Plain files and `--ndjson` documents never get a card, because they are not conversations and there is nothing to summarize.
+The default is `~/tennis`. `--ndjson` documents never get a card, because they are neither conversations nor files.
 
 ## Summaries
 
@@ -63,7 +99,7 @@ Tennis looks for `ANTHROPIC_API_KEY` first, then `OPENAI_API_KEY`, and uses whic
 |---|---|
 | `ANTHROPIC_API_KEY` | `claude-opus-5` |
 | `OPENAI_API_KEY` | `gpt-4o-mini` |
-| neither | no summary; the card carries the opening message |
+| neither | no summary; a conversation's card carries its opening message, a file's its first lines |
 
 `TENNIS_SUMMARY_MODEL` overrides the model for either provider — the lever for anyone summarizing a large backlog who would rather trade some quality for cost:
 
@@ -71,19 +107,21 @@ Tennis looks for `ANTHROPIC_API_KEY` first, then `OPENAI_API_KEY`, and uses whic
 TENNIS_SUMMARY_MODEL=claude-haiku-4-5-20251001 tennis add ~/.claude
 ```
 
-Without a key, cards are still written. Each carries the first thing the person typed, which is almost always the clearest statement of what they wanted, and the import says so once up front rather than failing:
+Without a key, cards are still written. A conversation's card carries the first thing the person typed, which is almost always the clearest statement of what they wanted; a file's carries its opening lines, up to a dozen of them, since the start of a document is usually what it is about. The import says so once up front rather than failing:
 
 ```bash
 $ tennis add ~/.claude
 tennis: no ANTHROPIC_API_KEY or OPENAI_API_KEY; cards will carry the opening message instead of a summary
 ```
 
-Four summaries are in flight at a time, so a first import of several hundred conversations is bounded by the provider's rate limit rather than by one round trip after another. A summary that fails — a refusal, a timeout, a rate limit on conversation 300 — costs that card its prose and nothing else: the card is written with the opening message, the failure is reported on stderr, and the import carries on. With `--json` the counts come back as `cards` and `cards_unsummarized`.
+The model is asked a different question for each. For a conversation it writes two to four sentences on what the person was trying to do, what was decided or produced, and what was left unresolved. For a file, "what was decided" is the wrong question — a spreadsheet decided nothing — so it is asked what the file is, what it holds, and what someone would open it to find, and is given the file's name and path alongside its text.
 
-The summarizer sees the conversation's text, not its tool calls and results, with consecutive turns from one speaker merged. A very long session is cut in the middle — the opening carries what it set out to do and the end carries how it finished.
+Four summaries are in flight at a time, so a first import of several hundred conversations or files is bounded by the provider's rate limit rather than by one round trip after another. A summary that fails — a refusal, a timeout, a rate limit on item 300 — costs that card its prose and nothing else: the card is written with its opening message or opening lines, the failure is reported on stderr, and the import carries on. With `--json` the counts come back as `cards` and `cards_unsummarized`.
+
+The summarizer sees a conversation's text, not its tool calls and results, with consecutive turns from one speaker merged. A very long session or file is cut in the middle: the first 24,000 characters and the last 8,000 are kept, because the opening says what it set out to do and the end says how it finished.
 
 ## Why they are not indexed
 
 Tennis writes cards and never reads them back. The documents in SQLite are the record; a card is a rendering of one. That one-way rule is what makes cards safe to edit, move, delete, or hand to another tool without touching the archive.
 
-It is also why `tennis add ~/tennis` is not something to do. Indexing the cards would rank every conversation twice — once as a short, on-topic summary and once as the long transcript that actually holds the answer — and the summary would usually win.
+It is also why `tennis add ~/tennis` is not something to do. Indexing the cards would rank every conversation and file twice — once as a short, on-topic summary and once as the full text that actually holds the answer — and the summary would usually win.

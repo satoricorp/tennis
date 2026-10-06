@@ -36,7 +36,18 @@ tennis add --files ~/Documents/notes
 
 A `.zip`, an already-unzipped directory, and a single transcript are all acceptable. [Importing sessions](/importing) covers what Tennis reads out of each format and what it deliberately skips.
 
-Plain files are read by whatever reads their kind: text of any sort as it is; spreadsheets, Word, PowerPoint, HTML and EPUB by tennis itself; PDFs with `pdftotext` when it is installed or, on a Mac, by Spotlight; RTF, Pages, Numbers, Keynote and the older Office formats through macOS. Photos, audio, video, archives and dotfiles are passed over. Every file and every conversation also gets a card, a markdown summary written to `~/tennis` and never read back into the index. Adding the same source again rewrites only the cards whose file or conversation changed.
+A folder add reads every file that holds text, each by whatever reads its kind:
+
+- **Plain text of any kind**, whatever the extension: notes, code, JSON, CSV, a `Makefile`.
+- **Spreadsheets, Word, PowerPoint, HTML and EPUB** (`.xlsx`, `.docx`, `.pptx`, `.html`, `.epub`) are read by Tennis itself: a workbook sheet by sheet with its dates as dates, a deck slide by slide, a book chapter by chapter in reading order.
+- **PDFs** are read with `pdftotext` when it is installed, and otherwise, on a Mac, through Spotlight.
+- **RTF, `.doc`, `.xls`, `.ppt`, Pages, Numbers, Keynote and email** are read through macOS.
+
+The rest is passed over:
+
+- **Photos, audio, video, archives, dotfiles**, and anything under a dot directory such as `.git` are skipped silently. A folder of photos is not a folder of mistakes.
+- **Other binary files, and text over 10MB**, are skipped with a note on stderr. Binary detection is a NUL-byte check in the leading 8KB, the same heuristic git uses.
+- **Formats with no reader on this machine** — a PDF on Linux without `pdftotext`, or a Pages file anywhere but a Mac — are skipped with a "no reader on this machine" note that says what is missing.
 
 ```bash
 tennis add ./src --files --ext .go,.ts,.rs    # only these extensions (default: everything with text)
@@ -55,8 +66,6 @@ tennis add ./docs --json                      # machine-readable
 | `--ndjson` | read documents from stdin instead of a path; see [below](#tennis-add---ndjson) |
 | `--per <unit>` | one document per `turn` (default) or `conversation` |
 | `--ext <list>` | only these extensions, when the source is plain files (default: everything with text in it) |
-| `--cards <dir>` | where summary cards are written (default `~/tennis`, or `$TENNIS_CARDS`) |
-| `--no-cards` | skip the summary cards |
 | `--chunk <n>` | chunk size in characters, for a new namespace |
 | `--model <name>` | built-in model for a new namespace (default `potion-retrieval-32M`) |
 | `--openai <model>` | use an OpenAI model instead (requires `OPENAI_API_KEY`) |
@@ -65,7 +74,7 @@ tennis add ./docs --json                      # machine-readable
 | `--db <path>` | database file (default `~/.tennis/db.sqlite`, or `$TENNIS_DB`) |
 | `--json` | machine-readable output on stdout; progress goes to stderr |
 
-Every conversation `add` imports is also written out as a card: one markdown file per session, with the session's details in frontmatter and a summary when you have an API key. Plain files and `--ndjson` documents get no card, because they are not conversations. [Cards](/cards) has the whole story.
+Every conversation and every file `add` reads is also written out as a card: one markdown file each in `~/tennis`, with its details in frontmatter and a summary when you have an API key. Without a key, a conversation's card carries its opening message and a file's its first lines. `--ndjson` documents get no card, because they are neither conversations nor files. [Cards](/cards) has the whole story.
 
 ```bash
 $ tennis add ~/.claude
@@ -77,8 +86,6 @@ imported 5, skipped 0 unchanged, 5 chunks in "context", 2 cards in /Users/you/te
 Re-running `add` is an incremental update. Files are keyed by path and skipped when contents and metadata are byte-identical to what is stored; session documents are keyed by the export's own conversation and message IDs, so a fresh export months later writes only what is new.
 
 Given several paths, a path that fails partway ends the run but not retroactively: what the earlier paths read is written and their cards are finished, the usual summary is printed, and the error is what the command exits on. With `--json` the report lists the sources that went in and carries the error beside them. A path that does not exist at all is refused before anything is read, so a typo never leaves an empty namespace behind.
-
-`add` refuses two kinds of junk when reading plain files, with a note on stderr: files containing binary content, and files over 10MB. Binary detection is a NUL-byte check in the leading 8KB, the same heuristic git uses.
 
 ## tennis search
 

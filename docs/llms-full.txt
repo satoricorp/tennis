@@ -15,7 +15,7 @@ One static binary. The embedding model ships inside it, so semantic search works
 - **Two rankers, one list.** BM25 (SQLite FTS5) catches names, IDs, and rare terms. Embedding vectors catch paraphrases. Reciprocal rank fusion merges them.
 - **Your data stays a file.** `~/.tennis/db.sqlite`, and nothing else.
 - **Your history, indexed.** Point it at a ChatGPT or Claude export, or at `~/.claude` or `~/.codex`, and search months of conversation.
-- **A readable copy.** Every imported conversation also lands as a markdown card in `~/tennis`, summarized when you have an API key.
+- **A readable copy.** Every conversation and file you add also lands as a markdown card in `~/tennis`, summarized when you have an API key.
 - **It won't lie to you.** If something changes that would make results silently wrong, it stops and says so.
 
 > **Where this sits:** Tennis is the [sqlite-vec](https://github.com/asg017/sqlite-vec) idea — vectors in a SQLite file you own — plus the parts you would otherwise assemble yourself: BM25 fused with semantic search into one ranking, and the embedder shipped in the binary. See [How it works](/how-it-works#compared-to-sqlite-vec) for the comparison.
@@ -23,7 +23,7 @@ One static binary. The embedding model ships inside it, so semantic search works
 - [Getting Started](/getting-started): Install, index a directory, run the first search.
 - [CLI](/cli): Every command and flag, with real output.
 - [Importing sessions](/importing): ChatGPT, Claude, Claude Code, and Codex history.
-- [Cards](/cards): The markdown copy of every conversation, and how it is summarized.
+- [Cards](/cards): The markdown copy of every conversation and file, and how it is summarized.
 - [Go SDK](/go-sdk): Open, write, query, and filter from Go.
 - [HTTP API](/http-api): A local server for every other language.
 - [Embedders](/embedders): The built-in model, OpenAI, and why the binding is enforced.
@@ -63,11 +63,14 @@ git clone https://github.com/satoricorp/tennis && cd tennis && CGO_ENABLED=0 go 
 ```bash
 $ tennis add ~/Documents/notes
 tennis: created namespace "context" bound to builtin:potion-retrieval-32M
+tennis: no ANTHROPIC_API_KEY or OPENAI_API_KEY; cards will carry the opening message instead of a summary
 tennis: /Users/you/Documents/notes: reading plain files
-imported 3, skipped 0 unchanged, 3 chunks in "context"
+imported 3, skipped 0 unchanged, 3 chunks in "context", 3 cards in /Users/you/tennis
 ```
 
 You never named a namespace, so `add` used `context`, the default, and created it on first use. By default it reads every file with text in it — notes, spreadsheets, Word files, PDFs; pass `--ext` to narrow it to some extensions.
+
+The note about API keys is about [cards](/cards), not search: every file is also written to `~/tennis` as a short markdown card, and a key turns the card's opening lines into a summary. Search never needs one.
 
 ## Search it
 
@@ -119,9 +122,8 @@ The `[kw#1 sem#1]` tag says which ranker found a hit, and where in that ranker's
 ## Re-indexing is nearly free
 
 ```bash
-$ tennis add ~/Documents/notes
-tennis: /Users/you/Documents/notes: reading plain files
-imported 0, skipped 3 unchanged, 0 chunks in "context"
+$ tennis add ~/Documents/notes 2>/dev/null
+imported 0, skipped 3 unchanged, 0 chunks in "context", 3 cards in /Users/you/tennis
 ```
 
 Unchanged files are never re-read into the model. Re-adding a large corpus after editing one file costs about as much as indexing one file.
@@ -144,13 +146,13 @@ DATE             SOURCE         DOCS  TITLE
 2 sessions
 ```
 
-`ls` shows what is there without running a search. The two cards are a readable copy of each conversation, written to `~/tennis` as it was imported — and summarized, if you set an API key. See [Importing sessions](/importing) and [Cards](/cards).
+`ls` shows what is there without running a search. The two new cards are a readable copy of each conversation, written to `~/tennis` beside the ones for your notes — and summarized, if you set an API key. See [Importing sessions](/importing) and [Cards](/cards).
 
 ## Next steps
 
 - [CLI](/cli) — every command and flag
 - [Importing sessions](/importing) — index the agent and chat history you already have
-- [Cards](/cards) — the markdown copy of every conversation
+- [Cards](/cards) — the markdown copy of every conversation and file
 - [Go SDK](/go-sdk) and [HTTP API](/http-api) — using Tennis from code
 - [/llms.txt](/llms.txt) — machine-readable docs
 
@@ -189,7 +191,18 @@ tennis add --files ~/Documents/notes
 
 A `.zip`, an already-unzipped directory, and a single transcript are all acceptable. [Importing sessions](/importing) covers what Tennis reads out of each format and what it deliberately skips.
 
-Plain files are read by whatever reads their kind: text of any sort as it is; spreadsheets, Word, PowerPoint, HTML and EPUB by tennis itself; PDFs with `pdftotext` when it is installed or, on a Mac, by Spotlight; RTF, Pages, Numbers, Keynote and the older Office formats through macOS. Photos, audio, video, archives and dotfiles are passed over. Every file and every conversation also gets a card, a markdown summary written to `~/tennis` and never read back into the index. Adding the same source again rewrites only the cards whose file or conversation changed.
+A folder add reads every file that holds text, each by whatever reads its kind:
+
+- **Plain text of any kind**, whatever the extension: notes, code, JSON, CSV, a `Makefile`.
+- **Spreadsheets, Word, PowerPoint, HTML and EPUB** (`.xlsx`, `.docx`, `.pptx`, `.html`, `.epub`) are read by Tennis itself: a workbook sheet by sheet with its dates as dates, a deck slide by slide, a book chapter by chapter in reading order.
+- **PDFs** are read with `pdftotext` when it is installed, and otherwise, on a Mac, through Spotlight.
+- **RTF, `.doc`, `.xls`, `.ppt`, Pages, Numbers, Keynote and email** are read through macOS.
+
+The rest is passed over:
+
+- **Photos, audio, video, archives, dotfiles**, and anything under a dot directory such as `.git` are skipped silently. A folder of photos is not a folder of mistakes.
+- **Other binary files, and text over 10MB**, are skipped with a note on stderr. Binary detection is a NUL-byte check in the leading 8KB, the same heuristic git uses.
+- **Formats with no reader on this machine** — a PDF on Linux without `pdftotext`, or a Pages file anywhere but a Mac — are skipped with a "no reader on this machine" note that says what is missing.
 
 ```bash
 tennis add ./src --files --ext .go,.ts,.rs    # only these extensions (default: everything with text)
@@ -208,8 +221,6 @@ tennis add ./docs --json                      # machine-readable
 | `--ndjson` | read documents from stdin instead of a path; see [below](#tennis-add---ndjson) |
 | `--per <unit>` | one document per `turn` (default) or `conversation` |
 | `--ext <list>` | only these extensions, when the source is plain files (default: everything with text in it) |
-| `--cards <dir>` | where summary cards are written (default `~/tennis`, or `$TENNIS_CARDS`) |
-| `--no-cards` | skip the summary cards |
 | `--chunk <n>` | chunk size in characters, for a new namespace |
 | `--model <name>` | built-in model for a new namespace (default `potion-retrieval-32M`) |
 | `--openai <model>` | use an OpenAI model instead (requires `OPENAI_API_KEY`) |
@@ -218,7 +229,7 @@ tennis add ./docs --json                      # machine-readable
 | `--db <path>` | database file (default `~/.tennis/db.sqlite`, or `$TENNIS_DB`) |
 | `--json` | machine-readable output on stdout; progress goes to stderr |
 
-Every conversation `add` imports is also written out as a card: one markdown file per session, with the session's details in frontmatter and a summary when you have an API key. Plain files and `--ndjson` documents get no card, because they are not conversations. [Cards](/cards) has the whole story.
+Every conversation and every file `add` reads is also written out as a card: one markdown file each in `~/tennis`, with its details in frontmatter and a summary when you have an API key. Without a key, a conversation's card carries its opening message and a file's its first lines. `--ndjson` documents get no card, because they are neither conversations nor files. [Cards](/cards) has the whole story.
 
 ```bash
 $ tennis add ~/.claude
@@ -230,8 +241,6 @@ imported 5, skipped 0 unchanged, 5 chunks in "context", 2 cards in /Users/you/te
 Re-running `add` is an incremental update. Files are keyed by path and skipped when contents and metadata are byte-identical to what is stored; session documents are keyed by the export's own conversation and message IDs, so a fresh export months later writes only what is new.
 
 Given several paths, a path that fails partway ends the run but not retroactively: what the earlier paths read is written and their cards are finished, the usual summary is printed, and the error is what the command exits on. With `--json` the report lists the sources that went in and carries the error beside them. A path that does not exist at all is refused before anything is read, so a typo never leaves an empty namespace behind.
-
-`add` refuses two kinds of junk when reading plain files, with a note on stderr: files containing binary content, and files over 10MB. Binary detection is a NUL-byte check in the leading 8KB, the same heuristic git uses.
 
 ## tennis search
 
@@ -646,7 +655,7 @@ Three omissions, each for the same reason — they would make every future ranki
 
 # Cards (/cards)
 
-Search answers a question. A card is for the other thing you do with history: read it. Every conversation `add` imports is written out as one markdown file, so a year of sessions becomes a folder you can open in any editor, grep, sync, or paste somewhere else.
+Search answers a question. A card is for the other thing you do with what you have indexed: read it. Every conversation and every file `add` reads is written out as one markdown file, so a year of sessions and a folder of documents become a folder of short summaries you can open in any editor, grep, sync, or paste somewhere else.
 
 ```bash
 $ tennis add ~/.claude
@@ -654,12 +663,20 @@ tennis: summarizing cards with anthropic:claude-opus-5
 tennis: /Users/you/.claude: reading Claude Code session transcripts
 imported 5, skipped 0 unchanged, 5 chunks in "context", 2 cards in /Users/you/tennis
 
+$ tennis add ~/Documents/notes
+tennis: summarizing cards with anthropic:claude-opus-5
+tennis: /Users/you/Documents/notes: reading plain files
+imported 3, skipped 0 unchanged, 3 chunks in "context", 3 cards in /Users/you/tennis
+
 $ ls ~/tennis
 2026-08-01-100000-claude-code-flaky-auth-test-token-refresh-window.md
 2026-08-03-093000-claude-code-toml-config-parser-with-defaults.md
+auth-md-3f9e328a.md
+config-md-d1305502.md
+retry-md-fc40188a.md
 ```
 
-## A card, in full
+## A conversation's card
 
 ```markdown
 ---
@@ -686,6 +703,34 @@ The frontmatter carries what the import knew: the document-id prefix as `session
 
 The filename is the UTC timestamp, the source, and a slug of the title: `2026-08-01-100000-claude-code-flaky-auth-test-token-refresh-window.md`. Claude Code names a session several turns in, so importing twice can produce two titles for one conversation; the timestamp-and-source prefix is stable, and a re-import replaces the older card rather than leaving both.
 
+## A file's card
+
+````markdown
+---
+file: /Users/you/Documents/notes/auth.md
+source: file
+title: auth.md
+modified: 2026-10-05T14:02:11Z
+size: 163
+---
+
+# auth.md
+
+```
+# Session handling
+Make the login flow remember the user between sessions. The session cookie is
+set with an expiry so the browser keeps it after the tab closes.
+```
+
+Full text: `tennis search --where 'path=/Users/you/Documents/notes/auth.md'`
+````
+
+That one was written without an API key, so in place of a summary it carries the file's first lines, fenced so a spreadsheet's rows stay rows. With a key, it is a few sentences of prose like a conversation's.
+
+The frontmatter is the file's: its absolute path as `file`, `source: file`, its name as the `title`, when it was last `modified`, and its `size` in bytes. The last line is the filter that pulls up the text Tennis indexed.
+
+The filename is a slug of the file's name and the first eight hex digits of a SHA-256 of its path: `auth-md-3f9e328a.md`. Nothing in it depends on the file's contents or dates, so re-adding a folder after editing a file updates that file's card in place, and the hash keeps two `notes.md` in different folders apart. A file that moves or is renamed gets a new card; the old one stays until you delete it.
+
 ## Where they go
 
 | | |
@@ -694,7 +739,7 @@ The filename is the UTC timestamp, the source, and a slug of the title: `2026-08
 | `$TENNIS_CARDS` | the same, from the environment |
 | `--no-cards` | write none |
 
-The default is `~/tennis`. Plain files and `--ndjson` documents never get a card, because they are not conversations and there is nothing to summarize.
+The default is `~/tennis`. `--ndjson` documents never get a card, because they are neither conversations nor files.
 
 ## Summaries
 
@@ -706,7 +751,7 @@ Tennis looks for `ANTHROPIC_API_KEY` first, then `OPENAI_API_KEY`, and uses whic
 |---|---|
 | `ANTHROPIC_API_KEY` | `claude-opus-5` |
 | `OPENAI_API_KEY` | `gpt-4o-mini` |
-| neither | no summary; the card carries the opening message |
+| neither | no summary; a conversation's card carries its opening message, a file's its first lines |
 
 `TENNIS_SUMMARY_MODEL` overrides the model for either provider — the lever for anyone summarizing a large backlog who would rather trade some quality for cost:
 
@@ -714,22 +759,24 @@ Tennis looks for `ANTHROPIC_API_KEY` first, then `OPENAI_API_KEY`, and uses whic
 TENNIS_SUMMARY_MODEL=claude-haiku-4-5-20251001 tennis add ~/.claude
 ```
 
-Without a key, cards are still written. Each carries the first thing the person typed, which is almost always the clearest statement of what they wanted, and the import says so once up front rather than failing:
+Without a key, cards are still written. A conversation's card carries the first thing the person typed, which is almost always the clearest statement of what they wanted; a file's carries its opening lines, up to a dozen of them, since the start of a document is usually what it is about. The import says so once up front rather than failing:
 
 ```bash
 $ tennis add ~/.claude
 tennis: no ANTHROPIC_API_KEY or OPENAI_API_KEY; cards will carry the opening message instead of a summary
 ```
 
-Four summaries are in flight at a time, so a first import of several hundred conversations is bounded by the provider's rate limit rather than by one round trip after another. A summary that fails — a refusal, a timeout, a rate limit on conversation 300 — costs that card its prose and nothing else: the card is written with the opening message, the failure is reported on stderr, and the import carries on. With `--json` the counts come back as `cards` and `cards_unsummarized`.
+The model is asked a different question for each. For a conversation it writes two to four sentences on what the person was trying to do, what was decided or produced, and what was left unresolved. For a file, "what was decided" is the wrong question — a spreadsheet decided nothing — so it is asked what the file is, what it holds, and what someone would open it to find, and is given the file's name and path alongside its text.
 
-The summarizer sees the conversation's text, not its tool calls and results, with consecutive turns from one speaker merged. A very long session is cut in the middle — the opening carries what it set out to do and the end carries how it finished.
+Four summaries are in flight at a time, so a first import of several hundred conversations or files is bounded by the provider's rate limit rather than by one round trip after another. A summary that fails — a refusal, a timeout, a rate limit on item 300 — costs that card its prose and nothing else: the card is written with its opening message or opening lines, the failure is reported on stderr, and the import carries on. With `--json` the counts come back as `cards` and `cards_unsummarized`.
+
+The summarizer sees a conversation's text, not its tool calls and results, with consecutive turns from one speaker merged. A very long session or file is cut in the middle: the first 24,000 characters and the last 8,000 are kept, because the opening says what it set out to do and the end says how it finished.
 
 ## Why they are not indexed
 
 Tennis writes cards and never reads them back. The documents in SQLite are the record; a card is a rendering of one. That one-way rule is what makes cards safe to edit, move, delete, or hand to another tool without touching the archive.
 
-It is also why `tennis add ~/tennis` is not something to do. Indexing the cards would rank every conversation twice — once as a short, on-topic summary and once as the long transcript that actually holds the answer — and the summary would usually win.
+It is also why `tennis add ~/tennis` is not something to do. Indexing the cards would rank every conversation and file twice — once as a short, on-topic summary and once as the full text that actually holds the answer — and the summary would usually win.
 
 # Go SDK (/go-sdk)
 
@@ -1291,7 +1338,7 @@ error: rm takes ids, not a namespace: try `tennis rm e1 --ns agents`
 
 ## "no ANTHROPIC_API_KEY or OPENAI_API_KEY; cards will carry the opening message"
 
-Not an error. Every imported conversation is written to `~/tennis` as a markdown card, and the summary on the card needs a model. Without a key the card carries the first thing you typed instead; set either key and re-run `add` to fill in the prose, or pass `--no-cards` if you do not want them. Search is unaffected either way. See [Cards](/cards).
+Not an error. Every conversation and file `add` reads is written to `~/tennis` as a markdown card, and the summary on the card needs a model. Without a key a conversation's card carries the first thing you typed instead, and a file's carries its first lines; set either key and re-run `add` to fill in the prose, or pass `--no-cards` if you do not want them. Search is unaffected either way. See [Cards](/cards).
 
 ## "cannot parse filter … (want key=value, key>value, …)"
 

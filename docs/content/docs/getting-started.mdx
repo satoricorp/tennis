@@ -36,11 +36,14 @@ On first use Tennis fetches the embedding model (~123MB) to `~/.cache/tennis`. A
 ```bash
 $ tennis add ~/Documents/notes
 tennis: created namespace "context" bound to builtin:potion-retrieval-32M
+tennis: no ANTHROPIC_API_KEY or OPENAI_API_KEY; cards will carry the opening message instead of a summary
 tennis: /Users/you/Documents/notes: reading plain files
-imported 3, skipped 0 unchanged, 3 chunks in "context"
+imported 3, skipped 0 unchanged, 3 chunks in "context", 3 cards in /Users/you/tennis
 ```
 
 You never named a namespace, so `add` used `context`, the default, and created it on first use. By default it reads every file with text in it — notes, spreadsheets, Word files, PDFs; pass `--ext` to narrow it to some extensions.
+
+The note about API keys is about [cards](/cards), not search: every file is also written to `~/tennis` as a short markdown card, and a key turns the card's opening lines into a summary. Search never needs one.
 
 ## Search it
 
@@ -92,9 +95,8 @@ The `[kw#1 sem#1]` tag says which ranker found a hit, and where in that ranker's
 ## Re-indexing is nearly free
 
 ```bash
-$ tennis add ~/Documents/notes
-tennis: /Users/you/Documents/notes: reading plain files
-imported 0, skipped 3 unchanged, 0 chunks in "context"
+$ tennis add ~/Documents/notes 2>/dev/null
+imported 0, skipped 3 unchanged, 0 chunks in "context", 3 cards in /Users/you/tennis
 ```
 
 Unchanged files are never re-read into the model. Re-adding a large corpus after editing one file costs about as much as indexing one file.
@@ -117,12 +119,12 @@ DATE             SOURCE         DOCS  TITLE
 2 sessions
 ```
 
-`ls` shows what is there without running a search. The two cards are a readable copy of each conversation, written to `~/tennis` as it was imported — and summarized, if you set an API key. See [Importing sessions](/importing) and [Cards](/cards).
+`ls` shows what is there without running a search. The two new cards are a readable copy of each conversation, written to `~/tennis` beside the ones for your notes — and summarized, if you set an API key. See [Importing sessions](/importing) and [Cards](/cards).
 
 ## Next steps
 
 - [CLI](/cli) — every command and flag
 - [Importing sessions](/importing) — index the agent and chat history you already have
-- [Cards](/cards) — the markdown copy of every conversation
+- [Cards](/cards) — the markdown copy of every conversation and file
 - [Go SDK](/go-sdk) and [HTTP API](/http-api) — using Tennis from code
 - [/llms.txt](/llms.txt) — machine-readable docs

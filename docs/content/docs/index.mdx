@@ -18,7 +18,7 @@ One static binary. The embedding model ships inside it, so semantic search works
 - **Two rankers, one list.** BM25 (SQLite FTS5) catches names, IDs, and rare terms. Embedding vectors catch paraphrases. Reciprocal rank fusion merges them.
 - **Your data stays a file.** `~/.tennis/db.sqlite`, and nothing else.
 - **Your history, indexed.** Point it at a ChatGPT or Claude export, or at `~/.claude` or `~/.codex`, and search months of conversation.
-- **A readable copy.** Every imported conversation also lands as a markdown card in `~/tennis`, summarized when you have an API key.
+- **A readable copy.** Every conversation and file you add also lands as a markdown card in `~/tennis`, summarized when you have an API key.
 - **It won't lie to you.** If something changes that would make results silently wrong, it stops and says so.
 
 <Callout type="info" title="Where this sits">
@@ -29,7 +29,7 @@ Tennis is the [sqlite-vec](https://github.com/asg017/sqlite-vec) idea — vector
   <Card title="Getting Started" href="/getting-started" description="Install, index a directory, run the first search." />
   <Card title="CLI" href="/cli" description="Every command and flag, with real output." />
   <Card title="Importing sessions" href="/importing" description="ChatGPT, Claude, Claude Code, and Codex history." />
-  <Card title="Cards" href="/cards" description="The markdown copy of every conversation, and how it is summarized." />
+  <Card title="Cards" href="/cards" description="The markdown copy of every conversation and file, and how it is summarized." />
   <Card title="Go SDK" href="/go-sdk" description="Open, write, query, and filter from Go." />
   <Card title="HTTP API" href="/http-api" description="A local server for every other language." />
   <Card title="Embedders" href="/embedders" description="The built-in model, OpenAI, and why the binding is enforced." />

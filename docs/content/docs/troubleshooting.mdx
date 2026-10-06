@@ -107,7 +107,7 @@ error: rm takes ids, not a namespace: try `tennis rm e1 --ns agents`
 
 ## "no ANTHROPIC_API_KEY or OPENAI_API_KEY; cards will carry the opening message"
 
-Not an error. Every imported conversation is written to `~/tennis` as a markdown card, and the summary on the card needs a model. Without a key the card carries the first thing you typed instead; set either key and re-run `add` to fill in the prose, or pass `--no-cards` if you do not want them. Search is unaffected either way. See [Cards](/cards).
+Not an error. Every conversation and file `add` reads is written to `~/tennis` as a markdown card, and the summary on the card needs a model. Without a key a conversation's card carries the first thing you typed instead, and a file's carries its first lines; set either key and re-run `add` to fill in the prose, or pass `--no-cards` if you do not want them. Search is unaffected either way. See [Cards](/cards).
 
 ## "cannot parse filter … (want key=value, key>value, …)"
 

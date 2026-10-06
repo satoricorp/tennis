@@ -296,7 +296,6 @@ tennis import history ~/Downloads/export.zip   # like tennis add ~/Downloads/exp
 tennis match notes "keep me signed in"         # like tennis search "keep me signed in" --ns notes
 ```
 
-
 ---
 
 ## Go SDK
