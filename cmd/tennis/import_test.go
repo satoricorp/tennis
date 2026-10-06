@@ -696,7 +696,7 @@ func TestImportClaudeCodeSubagent(t *testing.T) {
 func TestImportClaudeCodeSubagentHasNoCard(t *testing.T) {
 	dir := t.TempDir()
 	sum := &recordingSummarizer{}
-	w := addCards(t, writeTree(t, claudeCodeWithSubagent), formatClaudeCode, sum, dir)
+	w := addCards(t, writeTree(t, claudeCodeWithSubagent), formatClaudeCode, "", sum, dir)
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		t.Fatal(err)

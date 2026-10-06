@@ -124,7 +124,7 @@ func TestCardsStartedInTheSameSecondKeepTheirOwn(t *testing.T) {
 	run := func(cs ...conversation) (*cardWriter, *recordingSummarizer) {
 		t.Helper()
 		rec := &recordingSummarizer{}
-		w, err := newCardWriter(t.Context(), dir, rec)
+		w, err := newCardWriter(t.Context(), dir, "", rec)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -196,7 +196,7 @@ func TestUndatedCardKeepsItsName(t *testing.T) {
 		t.Errorf("undated conversation is named %q (prefix %q)", stem, prefix)
 	}
 	for i := 0; i < 2; i++ {
-		w, err := newCardWriter(t.Context(), dir, &recordingSummarizer{})
+		w, err := newCardWriter(t.Context(), dir, "", &recordingSummarizer{})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -216,7 +216,7 @@ func TestCardWriterSkipsEmptyText(t *testing.T) {
 	c := fileCard("/n/blank.md", "blank.md", " \n\t\n", time.Time{}, 4)
 	for i, wantWritten := range []int{1, 0} {
 		rec := &recordingSummarizer{}
-		w, err := newCardWriter(t.Context(), dir, rec)
+		w, err := newCardWriter(t.Context(), dir, "", rec)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -307,7 +307,7 @@ func TestCardWriterDegradesOnSummaryFailure(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("TENNIS_CARDS", dir)
 
-	w, err := newCardWriter(t.Context(), dir, failingSummarizer{})
+	w, err := newCardWriter(t.Context(), dir, "", failingSummarizer{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -333,7 +333,7 @@ func TestCardWriterDegradesOnSummaryFailure(t *testing.T) {
 // TestCardWriterCloseIsIdempotent: close runs at the end of an import and again
 // from a deferred safety net, and closing a channel twice panics.
 func TestCardWriterCloseIsIdempotent(t *testing.T) {
-	w, err := newCardWriter(t.Context(), t.TempDir(), nil)
+	w, err := newCardWriter(t.Context(), t.TempDir(), "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -403,7 +403,7 @@ func TestFileCardFrontmatter(t *testing.T) {
 func TestCardWriterSummarizesFilesAsFiles(t *testing.T) {
 	dir := t.TempDir()
 	rec := &recordingSummarizer{}
-	w, err := newCardWriter(t.Context(), dir, rec)
+	w, err := newCardWriter(t.Context(), dir, "", rec)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -439,7 +439,7 @@ func TestCardWriterSummarizesFilesAsFiles(t *testing.T) {
 // rows rather than one run-on line.
 func TestCardWriterFallsBackToFileOpening(t *testing.T) {
 	dir := t.TempDir()
-	w, err := newCardWriter(t.Context(), dir, nil)
+	w, err := newCardWriter(t.Context(), dir, "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -563,12 +563,12 @@ func TestFrontmatterRoundTrips(t *testing.T) {
 	}
 }
 
-// addCards runs one source through the import the way `tennis add` does, with
-// sum writing the cards into dir, and returns the writer for its counts. Each
-// call is a fresh writer, as each add is a fresh process.
-func addCards(t *testing.T, src, format string, sum summarize.Summarizer, dir string) *cardWriter {
+// addCards runs one source through the import the way `tennis add` does into
+// namespace ns, with sum writing the cards into dir, and returns the writer
+// for its counts. Each call is a fresh writer, as each add is a fresh process.
+func addCards(t *testing.T, src, format, ns string, sum summarize.Summarizer, dir string) *cardWriter {
 	t.Helper()
-	w, err := newCardWriter(t.Context(), dir, sum)
+	w, err := newCardWriter(t.Context(), dir, ns, sum)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -600,7 +600,7 @@ func TestReaddSummarizesOnlyWhatChanged(t *testing.T) {
 	add := func(src, format string) (*cardWriter, *recordingSummarizer) {
 		t.Helper()
 		rec := &recordingSummarizer{}
-		return addCards(t, src, format, rec, cards), rec
+		return addCards(t, src, format, "", rec, cards), rec
 	}
 
 	if w, rec := add(notes, formatFiles); len(rec.seen) != 2 || w.written != 2 {
@@ -655,6 +655,64 @@ func TestReaddSummarizesOnlyWhatChanged(t *testing.T) {
 	}
 }
 
+// TestCardNamesItsNamespace: after add --ns work, a command that searched the
+// default namespace found nothing there, or no namespace at all. The card has
+// to name the one the import wrote to — and naming it must not cost the cards
+// already on disk a summary each: the command is layout, outside the digest,
+// so a re-add after this change leaves every one of them as it is.
+func TestCardNamesItsNamespace(t *testing.T) {
+	if got := renderCard(conv("x", user("hi")).card(), "", ""); !strings.HasSuffix(got, "`tennis search --where 'session=s1'`\n") {
+		t.Errorf("a card in the default namespace should not name it:\n%s", got)
+	}
+
+	cards := t.TempDir()
+	notes := t.TempDir()
+	if err := os.WriteFile(filepath.Join(notes, "auth.md"), []byte("# Session handling\nkeep the user signed in"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	session := writeZip(t, "codex.zip", map[string]string{"sessions/rollout-S9.jsonl": codexSession})
+	// The file and the session, each an add --ns work: summaries asked for,
+	// cards written, and cards left as they were.
+	add := func() (summaries, written, unchanged int) {
+		t.Helper()
+		rec := &recordingSummarizer{}
+		for _, src := range []struct{ path, format string }{{notes, formatFiles}, {session, formatAuto}} {
+			w := addCards(t, src.path, src.format, "work", rec, cards)
+			written += w.written
+			unchanged += w.unchanged
+		}
+		return len(rec.seen), written, unchanged
+	}
+	if n, written, _ := add(); n != 2 || written != 2 {
+		t.Fatalf("first add: %d summaries, %d written; want 2 and 2", n, written)
+	}
+	entries, _ := os.ReadDir(cards)
+	for _, e := range entries {
+		path := filepath.Join(cards, e.Name())
+		body, _ := os.ReadFile(path)
+		if !strings.Contains(string(body), "`tennis search --ns work --where '") {
+			t.Errorf("%s does not name the namespace:\n%s", e.Name(), body)
+		}
+		// Put the card back as it was before cards named their namespace.
+		old := regexp.MustCompile("`tennis search --ns work --where '[^`]*'`\n$").ReplaceAllStringFunc(string(body), func(string) string {
+			fm := frontmatter(path)
+			if fm["source"] == "file" {
+				return "`tennis search --where 'path=" + fm["file"] + "'`\n"
+			}
+			return "`tennis search --where 'session=" + strings.TrimPrefix(fm["session"], "codex:") + "'`\n"
+		})
+		if old == string(body) {
+			t.Fatalf("could not put %s back as it was:\n%s", e.Name(), body)
+		}
+		if err := os.WriteFile(path, []byte(old), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if n, written, unchanged := add(); n != 0 || written != 0 || unchanged != 2 {
+		t.Errorf("re-add over cards written before: %d summaries, %d written, %d unchanged; want 0, 0, 2", n, written, unchanged)
+	}
+}
+
 // TestCardWriterRetriesWhatFellBack: a card that carries the opening because
 // there was no key, or because its summary failed, is summarized on the next
 // import that can — and a run with no key never trades a summary an earlier
@@ -664,7 +722,7 @@ func TestCardWriterRetriesWhatFellBack(t *testing.T) {
 	c := conv("A chat", user("how do I rotate the signing key"), assistant("with kid headers"))
 	run := func(sum summarize.Summarizer) *cardWriter {
 		t.Helper()
-		w, err := newCardWriter(t.Context(), dir, sum)
+		w, err := newCardWriter(t.Context(), dir, "", sum)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -736,22 +794,24 @@ func (failingSummarizer) Summarize(_ context.Context, _ summarize.Input) (string
 // TestCardPointerRuns: the last line of every card is a command, and it has to
 // work. It is taken off real cards from a real import, split into words by sh
 // exactly as a person pasting it would have it split, and run with nothing
-// added — the database comes from $TENNIS_DB, so not even a flag. A nil error
-// is what makes main exit 0.
+// added — the database comes from $TENNIS_DB, so the only flag is the --ns the
+// card itself names. A nil error is what makes main exit 0.
 //
 // What it prints has to be the rest of the record, not a ranked fragment of
 // it: the whole conversation, every turn in the order it was said, and the
 // whole file, which here is long enough to be several chunks and too long for
 // its card to carry.
+//
+// The names are the ones that broke it: a comma ends a --where clause, an
+// apostrophe ends the shell's quote, a backtick ends markdown's, and a session
+// id that looks like a number is compared as one. Each pass is its own
+// database, so a card that forgets its namespace finds none there.
 func TestCardPointerRuns(t *testing.T) {
 	cache := ndjsonTestCache(t)
 	t.Setenv("TENNIS_CACHE", cache)
 	t.Setenv("TENNIS_NS", "")
 	t.Setenv("ANTHROPIC_API_KEY", "")
 	t.Setenv("OPENAI_API_KEY", "")
-	cardDir := t.TempDir()
-	t.Setenv("TENNIS_CARDS", cardDir)
-	t.Setenv("TENNIS_DB", filepath.Join(t.TempDir(), "cards.sqlite"))
 
 	var note strings.Builder
 	note.WriteString("# Tulum trip\n\n")
@@ -759,74 +819,151 @@ func TestCardPointerRuns(t *testing.T) {
 		fmt.Fprintf(&note, "Day %d: walked to the cenote, then lunch near Hotel Esencia.\n", i)
 	}
 	notes := t.TempDir()
-	// A space in the name, so the quoting on the card is part of what is tested.
-	if err := os.WriteFile(filepath.Join(notes, "trip notes.md"), []byte(note.String()), 0o644); err != nil {
-		t.Fatal(err)
+	files := map[string]string{
+		"trip notes.md":      note.String(),
+		"budget, 2026.md":    "rent 1200, utilities 140",
+		"Joe's plan.md":      "ask about the deposit",
+		`say "hi".md`:        "a greeting, quoted",
+		"café ñandú 日本.md":   "non-ASCII, all the way down",
+		"it's, a `tick`.md":  "every awkward thing at once",
+		`back\slash.md`:      "a backslash in the name",
+		"a=b, c>=d, e!=f.md": "operators in the name",
 	}
-	session := writeZip(t, "sessions.zip", map[string]string{
-		"projects/-Users-joe-git-tennis/S1.jsonl": claudeCodeSession,
-	})
-	for _, args := range [][]string{{"--claude-code", session}, {"--files", notes}} {
-		if _, err := captureStderr(t, func() error {
-			_, err := captureStdout(t, func() error { return cmdAdd(args) })
-			return err
-		}); err != nil {
-			t.Fatalf("add %v: %v", args, err)
-		}
-	}
-
-	entries, err := os.ReadDir(cardDir)
-	if err != nil || len(entries) != 2 {
-		t.Fatalf("want a card for the session and one for the file, got %v (%v)", entries, err)
-	}
-	pointer := regexp.MustCompile("`(tennis [^`]+)`\\s*$")
-	for _, e := range entries {
-		body, err := os.ReadFile(filepath.Join(cardDir, e.Name()))
-		if err != nil {
+	for name, body := range files {
+		if err := os.WriteFile(filepath.Join(notes, name), []byte(body), 0o644); err != nil {
 			t.Fatal(err)
 		}
-		m := pointer.FindStringSubmatch(string(body))
-		if m == nil {
-			t.Errorf("%s does not end in a command:\n%s", e.Name(), body)
-			continue
+	}
+	odd := strings.NewReplacer(`"S1"`, `"it's, \"odd\""`, "the auth test is flaky", "the odd session")
+	numeric := strings.NewReplacer(`"S1"`, `"2026"`, "the auth test is flaky", "the numbered session")
+	session := writeZip(t, "sessions.zip", map[string]string{
+		"projects/-Users-joe-git-tennis/S1.jsonl":   claudeCodeSession,
+		"projects/-Users-joe-git-tennis/odd.jsonl":  odd.Replace(claudeCodeSession),
+		"projects/-Users-joe-git-tennis/2026.jsonl": numeric.Replace(claudeCodeSession),
+	})
+	openers := map[string]string{
+		"claude-code:S1":          "the auth test is flaky",
+		`claude-code:it's, "odd"`: "the odd session",
+		"claude-code:2026":        "the numbered session",
+	}
+
+	for _, ns := range []string{"", "work"} {
+		cardDir := t.TempDir()
+		t.Setenv("TENNIS_CARDS", cardDir)
+		t.Setenv("TENNIS_DB", filepath.Join(t.TempDir(), "cards.sqlite"))
+		var nsArgs []string
+		if ns != "" {
+			nsArgs = []string{"--ns", ns}
 		}
-		words, err := exec.Command("sh", "-c", `printf '%s\0' `+m[1]).Output()
-		if err != nil {
-			t.Fatalf("sh could not split %q: %v", m[1], err)
-		}
-		argv := strings.Split(strings.TrimSuffix(string(words), "\x00"), "\x00")
-		if len(argv) < 2 || argv[0] != "tennis" || argv[1] != "search" {
-			t.Fatalf("%s points at %q, which this test does not know how to run", e.Name(), m[1])
-		}
-		out, err := captureStdout(t, func() error { return cmdSearch(argv[2:]) })
-		if err != nil {
-			t.Errorf("%s: `%s` failed: %v", e.Name(), m[1], err)
-			continue
+		for _, args := range [][]string{{"--claude-code", session}, {"--files", notes}} {
+			args = append(slices.Clone(nsArgs), args...)
+			if _, err := captureStderr(t, func() error {
+				_, err := captureStdout(t, func() error { return cmdAdd(args) })
+				return err
+			}); err != nil {
+				t.Fatalf("add %v: %v", args, err)
+			}
 		}
 
-		if strings.Contains(string(body), "\nsource: file\n") {
-			if strings.TrimSpace(out) != strings.TrimSpace(note.String()) {
-				t.Errorf("`%s` did not print the file as it was:\n%s", m[1], out)
-			}
-			continue
+		entries, err := os.ReadDir(cardDir)
+		if err != nil || len(entries) != len(files)+len(openers) {
+			t.Fatalf("want a card for each session and each file, got %d (%v)", len(entries), err)
 		}
-		// The title, then every turn in index order. The documents' IDs sort
-		// differently (claude-code:S1:a1 before :u1), so ID order would fail.
-		want := []string{
-			"# Fixing the flaky auth test",
-			"## summary\n\nFixing the flaky auth test",
-			"## user\n\nthe auth test is flaky",
-			"## assistant\n\nlook at the token refresh window",
-			"## assistant/subagent\n\nsubagent found the race in the clock",
-		}
-		at := 0
-		for _, w := range want {
-			i := strings.Index(out[at:], w)
-			if i < 0 {
-				t.Errorf("`%s` is missing %q after byte %d:\n%s", m[1], w, at, out)
-				break
+		for _, e := range entries {
+			body, err := os.ReadFile(filepath.Join(cardDir, e.Name()))
+			if err != nil {
+				t.Fatal(err)
 			}
-			at += i + len(w)
+			cmd, ok := cardCommand(string(body))
+			if !ok {
+				t.Errorf("%s does not end in a command:\n%s", e.Name(), body)
+				continue
+			}
+			words, err := exec.Command("sh", "-c", `printf '%s\0' `+cmd).Output()
+			if err != nil {
+				t.Fatalf("sh could not split %q: %v", cmd, err)
+			}
+			argv := strings.Split(strings.TrimSuffix(string(words), "\x00"), "\x00")
+			if len(argv) < 2 || argv[0] != "tennis" || argv[1] != "search" {
+				t.Fatalf("%s points at %q, which this test does not know how to run", e.Name(), cmd)
+			}
+			if named := slices.Contains(argv, "--ns"); named != (ns != "") {
+				t.Errorf("%s: `%s` names a namespace: %v; the import wrote to %q", e.Name(), cmd, named, ns)
+			}
+			out, err := captureStdout(t, func() error { return cmdSearch(argv[2:]) })
+			if err != nil {
+				t.Errorf("%s: `%s` failed: %v", e.Name(), cmd, err)
+				continue
+			}
+
+			fm := frontmatter(filepath.Join(cardDir, e.Name()))
+			if fm["source"] == "file" {
+				want, known := files[filepath.Base(fm["file"])]
+				if !known || strings.TrimSpace(out) != strings.TrimSpace(want) {
+					t.Errorf("`%s` did not print %s as it was:\n%s", cmd, fm["file"], out)
+				}
+				continue
+			}
+			opener := openers[fm["session"]]
+			for other, said := range openers {
+				if other != fm["session"] && strings.Contains(out, said) {
+					t.Errorf("`%s` printed another session, %s, as well", cmd, other)
+				}
+			}
+			// The title, then every turn in index order. The documents' IDs
+			// sort differently (claude-code:S1:a1 before :u1), so ID order
+			// would fail.
+			want := []string{
+				"# Fixing the flaky auth test",
+				"## summary\n\nFixing the flaky auth test",
+				"## user\n\n" + opener,
+				"## assistant\n\nlook at the token refresh window",
+				"## assistant/subagent\n\nsubagent found the race in the clock",
+			}
+			at := 0
+			for _, w := range want {
+				i := strings.Index(out[at:], w)
+				if i < 0 {
+					t.Errorf("`%s` is missing %q after byte %d:\n%s", cmd, w, at, out)
+					break
+				}
+				at += i + len(w)
+			}
 		}
 	}
+}
+
+// cardCommand is the command in a card's last line, read out of its code span
+// the way markdown reads one: it opens with a run of backticks and closes at
+// the next run of the same length, which has to be the end of the line.
+func cardCommand(body string) (string, bool) {
+	lines := strings.Split(strings.TrimRight(body, "\n"), "\n")
+	_, span, ok := strings.Cut(lines[len(lines)-1], ": ")
+	n := len(span) - len(strings.TrimLeft(span, "`"))
+	if !ok || n == 0 {
+		return "", false
+	}
+	rest := span[n:]
+	for i := 0; i < len(rest); {
+		if rest[i] != '`' {
+			i++
+			continue
+		}
+		j := i
+		for j < len(rest) && rest[j] == '`' {
+			j++
+		}
+		if j-i == n {
+			if j != len(rest) {
+				return "", false // the span closes before the line ends
+			}
+			cmd := rest[:i]
+			if len(cmd) > 1 && cmd[0] == ' ' && cmd[len(cmd)-1] == ' ' {
+				cmd = cmd[1 : len(cmd)-1]
+			}
+			return cmd, strings.HasPrefix(cmd, "tennis ")
+		}
+		i = j
+	}
+	return "", false
 }

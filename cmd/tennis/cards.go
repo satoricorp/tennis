@@ -71,7 +71,11 @@ type card struct {
 
 	text     string // what the summarizer reads
 	fallback string // what the card carries instead when there is no summary
-	pointer  string // the line that says how to get the rest
+
+	// ns is the namespace the import wrote to, which the command on the
+	// card's last line has to name. Like the rest of that line it is layout,
+	// and outside the digest.
+	ns string
 }
 
 // digest identifies what a card describes: the text the summarizer reads and
@@ -114,7 +118,6 @@ func (c conversation) card() card {
 		title: title, stamp: c.create, when: when, turns: len(c.turns), meta: c.extra,
 		text:     c.transcript(),
 		fallback: summarize.Fallback(firstUserTurn(c)),
-		pointer:  fmt.Sprintf("Full conversation: `tennis search --where 'session=%s'`", c.id),
 	}
 }
 
@@ -131,8 +134,65 @@ func fileCard(id, name, text string, modified time.Time, size int64) card {
 		title: name, stamp: stamp, when: modified, meta: map[string]any{"size": size},
 		text:     text,
 		fallback: excerpt(text),
-		pointer:  fmt.Sprintf("Full text: `tennis search --where 'path=%s'`", id),
 	}
+}
+
+// pointer is the card's last line: the command that prints the whole of what
+// the card describes. It has to run as pasted, whatever the path or session
+// holds, so the value is quoted for --where when it needs to be, the filter
+// for the shell, and the command for markdown.
+func (c card) pointer() string {
+	label, key := "Full conversation", "session"
+	if c.kind == summarize.KindFile {
+		label, key = "Full text", "path"
+	}
+	cmd := "tennis search"
+	if c.ns != "" && c.ns != defaultNamespace {
+		cmd += " --ns " + shellWord(c.ns)
+	}
+	cmd += " --where " + shellQuote(key+"="+whereValue(c.id))
+	return label + ": " + codeSpan(cmd)
+}
+
+// whereValue writes v as parseWhere reads it back. Bare is the common case;
+// a comma would end the clause, a backslash or quote would be read as
+// quoting, spaces at either end would be trimmed, and a number-like id would
+// be compared as a number, so those are double-quoted.
+func whereValue(v string) string {
+	if _, isText := coerce(v).(string); isText && v != "" && strings.TrimSpace(v) == v && !strings.ContainsAny(v, `,"\`) {
+		return v
+	}
+	return `"` + strings.ReplaceAll(strings.ReplaceAll(v, `\`, `\\`), `"`, `\"`) + `"`
+}
+
+// shellQuote makes s one word to sh: single quotes, inside which nothing is
+// special but a single quote, which is closed, escaped, and reopened.
+func shellQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+}
+
+// shellWord is s as one word to sh, quoted only when it has to be. A
+// namespace name never needs it, but nothing here should rely on that.
+func shellWord(s string) string {
+	for _, r := range s {
+		if !(r < unicode.MaxASCII && (unicode.IsLetter(r) || unicode.IsDigit(r)) || strings.ContainsRune("-_./", r)) {
+			return shellQuote(s)
+		}
+	}
+	if s == "" {
+		return "''"
+	}
+	return s
+}
+
+// codeSpan wraps s in backticks for markdown, more of them than any run
+// inside it, so a backtick in a file's name cannot end the span early.
+func codeSpan(s string) string {
+	if n := longestRun(s, '`'); n > 0 {
+		fence := strings.Repeat("`", n+1)
+		return fence + " " + s + " " + fence
+	}
+	return "`" + s + "`"
 }
 
 // excerpt is a file's no-model fallback: its first lines as they are, in a
@@ -206,6 +266,7 @@ func threeBacktickFence(fallback string) string {
 // parser that is already finished.
 type cardWriter struct {
 	dir string
+	ns  string
 	sum summarize.Summarizer
 
 	work chan card
@@ -228,9 +289,10 @@ type cardWriter struct {
 	unchanged int
 }
 
-// newCardWriter starts the workers. A nil Summarizer is allowed: cards are
+// newCardWriter starts the workers. ns is the namespace the import writes
+// to, for the command on each card. A nil Summarizer is allowed: cards are
 // still written, carrying the opening of the thread or file instead of prose.
-func newCardWriter(ctx context.Context, dir string, sum summarize.Summarizer) (*cardWriter, error) {
+func newCardWriter(ctx context.Context, dir, ns string, sum summarize.Summarizer) (*cardWriter, error) {
 	expanded, err := expandHome(dir)
 	if err != nil {
 		return nil, err
@@ -239,7 +301,7 @@ func newCardWriter(ctx context.Context, dir string, sum summarize.Summarizer) (*
 		return nil, err
 	}
 
-	w := &cardWriter{dir: expanded, sum: sum, ctx: ctx, work: make(chan card)}
+	w := &cardWriter{dir: expanded, ns: ns, sum: sum, ctx: ctx, work: make(chan card)}
 	for i := 0; i < cardConcurrency; i++ {
 		w.wg.Add(1)
 		go func() {
@@ -256,6 +318,7 @@ func (w *cardWriter) add(c card) {
 	if w == nil {
 		return
 	}
+	c.ns = w.ns
 	w.work <- c
 }
 
@@ -560,7 +623,7 @@ func renderCard(c card, summary, by string) string {
 		b.WriteString(s)
 		b.WriteString("\n\n")
 	}
-	b.WriteString(c.pointer)
+	b.WriteString(c.pointer())
 	b.WriteString("\n")
 	return b.String()
 }

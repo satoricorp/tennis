@@ -96,6 +96,64 @@ func TestParseWhere(t *testing.T) {
 	var _ tennis.Filter // keep the import honest
 }
 
+// TestParseWhereQuotedValues: a card's last line filters on a path or a
+// session id, and either can hold a comma, which ends a clause. A double-quoted
+// value keeps its commas, reads \" and \\ as a quote and a backslash, and is
+// text even when it looks like a number. Unquoted values and every operator
+// read as they always did.
+func TestParseWhereQuotedValues(t *testing.T) {
+	cases := []struct {
+		in   string
+		want tennis.Filter
+	}{
+		{`path="/n/budget, 2026.md"`, tennis.Eq("path", "/n/budget, 2026.md")},
+		{`path="/n/say \"hi\".md"`, tennis.Eq("path", `/n/say "hi".md`)},
+		{`path="/n/back\\slash.md"`, tennis.Eq("path", `/n/back\slash.md`)},
+		{`path="C:\Users\joe"`, tennis.Eq("path", `C:\Users\joe`)}, // any other backslash is kept
+		{`path="/n/café, 日本.md"`, tennis.Eq("path", "/n/café, 日本.md")},
+		{`path="/n/it's"`, tennis.Eq("path", "/n/it's")},
+		{`session="2026"`, tennis.Eq("session", "2026")},
+		{`session=2026`, tennis.Eq("session", float64(2026))},
+		{`title=""`, tennis.Eq("title", "")},
+		{` a = "x, y" , b!=y `, tennis.And(tennis.Eq("a", "x, y"), tennis.NotEq("b", "y"))},
+		{`a="x",b>=2`, tennis.And(tennis.Eq("a", "x"), tennis.Gte("b", float64(2)))},
+		{`a<1,b>2,c<=3,d>=4,e!=5,f=6`, tennis.And(
+			tennis.Lt("a", float64(1)), tennis.Gt("b", float64(2)), tennis.Lte("c", float64(3)),
+			tennis.Gte("d", float64(4)), tennis.NotEq("e", float64(5)), tennis.Eq("f", float64(6)))},
+		{`cost>5,status!=failed,name<=z`, tennis.And(
+			tennis.Gt("cost", float64(5)), tennis.NotEq("status", "failed"), tennis.Lte("name", "z"))},
+		// The first operator is the clause's; the value may hold another.
+		{`path=/a>=b`, tennis.Eq("path", "/a>=b")},
+		{`path!=/a=b`, tennis.NotEq("path", "/a=b")},
+		// A quote that does not open the value is part of it, as before.
+		{`title=say "hi`, tennis.Eq("title", `say "hi`)},
+		{`status=merged,`, tennis.Eq("status", "merged")},
+	}
+	for _, c := range cases {
+		got, err := parseWhere(c.in)
+		if err != nil {
+			t.Errorf("parseWhere(%q): %v", c.in, err)
+			continue
+		}
+		if !reflect.DeepEqual(got, c.want) {
+			t.Errorf("parseWhere(%q) = %#v, want %#v", c.in, got, c.want)
+		}
+	}
+	for _, bad := range []string{
+		`path="/n/no closing quote`,
+		`path="/n/a" trailing`,
+		`path="/n/a\"`,
+		`no operator here`,
+		`=5`,
+		`a=1,junk`,
+		`a!b`,
+	} {
+		if f, err := parseWhere(bad); err == nil {
+			t.Errorf("parseWhere(%q) = %#v, want an error", bad, f)
+		}
+	}
+}
+
 func TestCoerce(t *testing.T) {
 	cases := []struct {
 		in   string

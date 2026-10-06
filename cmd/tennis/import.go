@@ -210,7 +210,7 @@ func runImport(nsName string, paths []string, o importOpts) error {
 
 	sink := &docSink{ctx: ctx, ns: ns}
 	if !o.noCards {
-		cards, err := newCardWriter(ctx, o.cardDir, newSummarizer(*asJSON))
+		cards, err := newCardWriter(ctx, o.cardDir, nsName, newSummarizer(*asJSON))
 		if err != nil {
 			return err
 		}

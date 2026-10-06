@@ -981,44 +981,100 @@ func cmdNS(args []string) error {
 // parseWhere turns "status=merged,cost>5" into a filter. Deliberately tiny:
 // anything more expressive belongs in the SDK, where a real expression is
 // clearer than a string that has to be escaped through a shell.
+//
+// A value may be double-quoted, for one with a comma in it — a path, say,
+// which is what the last line of a card filters on. Inside the quotes a comma
+// does not end the clause, \" is a quote and \\ a backslash, and the value
+// is text even if it looks like a number. Unquoted, a value is everything up
+// to the next comma, as it always was.
 func parseWhere(s string) (tennis.Filter, error) {
 	if strings.TrimSpace(s) == "" {
 		return nil, nil
 	}
 	var parts []tennis.Filter
-	for _, clause := range strings.Split(s, ",") {
-		clause = strings.TrimSpace(clause)
-		if clause == "" {
+	for i := 0; i <= len(s); {
+		// The operator is the first one in the clause, so a value may hold
+		// one of its own: path=/a>=b is path, =, /a>=b.
+		j := i
+		for j < len(s) && s[j] != ',' && !strings.ContainsRune("=<>", rune(s[j])) &&
+			!(s[j] == '!' && j+1 < len(s) && s[j+1] == '=') {
+			j++
+		}
+		key := strings.TrimSpace(s[i:j])
+		if j == len(s) || s[j] == ',' {
+			if key != "" {
+				return nil, fmt.Errorf("cannot parse filter %q (want key=value, key>value, ...)", key)
+			}
+			i = j + 1
 			continue
 		}
-		for _, op := range []string{">=", "<=", "!=", "=", ">", "<"} {
-			if i := strings.Index(clause, op); i > 0 {
-				key := strings.TrimSpace(clause[:i])
-				val := coerce(strings.TrimSpace(clause[i+len(op):]))
-				switch op {
-				case "=":
-					parts = append(parts, tennis.Eq(key, val))
-				case "!=":
-					parts = append(parts, tennis.NotEq(key, val))
-				case ">":
-					parts = append(parts, tennis.Gt(key, val))
-				case ">=":
-					parts = append(parts, tennis.Gte(key, val))
-				case "<":
-					parts = append(parts, tennis.Lt(key, val))
-				case "<=":
-					parts = append(parts, tennis.Lte(key, val))
-				}
-				goto next
-			}
+		op := s[j : j+1]
+		if j+1 < len(s) && s[j+1] == '=' && op != "=" {
+			op += "="
 		}
-		return nil, fmt.Errorf("cannot parse filter %q (want key=value, key>value, ...)", clause)
-	next:
+		if key == "" {
+			clause, _, _ := strings.Cut(s[i:], ",")
+			return nil, fmt.Errorf("cannot parse filter %q (want key=value, key>value, ...)", strings.TrimSpace(clause))
+		}
+
+		var val any
+		k := j + len(op)
+		for k < len(s) && (s[k] == ' ' || s[k] == '\t') {
+			k++
+		}
+		if k < len(s) && s[k] == '"' {
+			text, end, ok := unquoteWhere(s, k)
+			rest := end
+			for rest < len(s) && (s[rest] == ' ' || s[rest] == '\t') {
+				rest++
+			}
+			if !ok || (rest < len(s) && s[rest] != ',') {
+				return nil, fmt.Errorf("cannot parse filter %q (a quoted value needs a closing quote, then a comma or the end)", strings.TrimSpace(s[i:]))
+			}
+			val, i = text, rest+1
+		} else {
+			end := strings.IndexByte(s[k:], ',')
+			if end < 0 {
+				end = len(s) - k
+			}
+			val, i = coerce(strings.TrimSpace(s[k:k+end])), k+end+1
+		}
+
+		switch op {
+		case "=":
+			parts = append(parts, tennis.Eq(key, val))
+		case "!=":
+			parts = append(parts, tennis.NotEq(key, val))
+		case ">":
+			parts = append(parts, tennis.Gt(key, val))
+		case ">=":
+			parts = append(parts, tennis.Gte(key, val))
+		case "<":
+			parts = append(parts, tennis.Lt(key, val))
+		case "<=":
+			parts = append(parts, tennis.Lte(key, val))
+		}
 	}
 	if len(parts) == 1 {
 		return parts[0], nil
 	}
 	return tennis.And(parts...), nil
+}
+
+// unquoteWhere reads the double-quoted value that opens at s[at], returning it,
+// the index just past its closing quote, and whether there was one.
+func unquoteWhere(s string, at int) (string, int, bool) {
+	var b strings.Builder
+	for i := at + 1; i < len(s); i++ {
+		switch {
+		case s[i] == '"':
+			return b.String(), i + 1, true
+		case s[i] == '\\' && i+1 < len(s) && (s[i+1] == '"' || s[i+1] == '\\'):
+			i++
+		}
+		b.WriteByte(s[i])
+	}
+	return "", len(s), false
 }
 
 // coerce makes "5" a number so numeric comparisons work, while leaving
