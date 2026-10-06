@@ -128,6 +128,49 @@ func TestHTMLText(t *testing.T) {
 	}
 }
 
+// TestEPUBText: a book is its spine's pages in spine order — not the
+// manifest's order, not the zip's — with each href found relative to the
+// package file. The table of contents is left out though the spine lists it,
+// and so is the title every page repeats in its head.
+func TestEPUBText(t *testing.T) {
+	page := func(body string) string {
+		return `<?xml version="1.0" encoding="utf-8"?>
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml"><head><title>Tulum</title></head><body>` + body + `</body></html>`
+	}
+	book := zipOf(t, map[string]string{
+		"mimetype": "application/epub+zip",
+		"META-INF/container.xml": `<?xml version="1.0" encoding="UTF-8"?>
+<container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container">
+  <rootfiles><rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/></rootfiles>
+</container>`,
+		"OEBPS/content.opf": `<?xml version="1.0" encoding="utf-8"?>
+<package xmlns="http://www.idpf.org/2007/opf" version="3.0" unique-identifier="id">
+  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:title>Tulum</dc:title></metadata>
+  <manifest>
+    <item id="nav" href="nav.xhtml" media-type="application/xhtml+xml" properties="nav"/>
+    <item id="arrive" href="text/the%20arrival.xhtml" media-type="application/xhtml+xml"/>
+    <item id="depart" href="text/departure.xhtml" media-type="application/xhtml+xml"/>
+  </manifest>
+  <spine><itemref idref="nav"/><itemref idref="depart"/><itemref idref="arrive"/></spine>
+</package>`,
+		"OEBPS/nav.xhtml":              page(`<nav><ol><li>Contents</li></ol></nav>`),
+		"OEBPS/text/departure.xhtml":   page(`<h1>Leaving</h1><p>We left Austin on the 9 June flight.</p>`),
+		"OEBPS/text/the arrival.xhtml": page(`<h1>Arriving</h1><p>Hotel&nbsp;Esencia, Tulum.</p>`),
+	})
+	want := "Leaving\n\nWe left Austin on the 9 June flight.\n\nArriving\n\nHotel Esencia, Tulum."
+	got, err := epubText(book)
+	if err != nil || got != want {
+		t.Errorf("epubText:\n%q, %v\nwant:\n%q", got, err, want)
+	}
+	if got, err := fileText(entry("guide.epub", book)); err != nil || got != want {
+		t.Errorf("an .epub should be read by tennis itself, not handed to the OS: %q, %v", got, err)
+	}
+	if _, err := epubText(zipOf(t, map[string]string{"OEBPS/text/departure.xhtml": "x"})); err == nil {
+		t.Error("a zip with no container.xml passed as a book")
+	}
+}
+
 // TestSpotlightText: the one attribute wanted out of an importer dump, with
 // its escapes undone.
 func TestSpotlightText(t *testing.T) {

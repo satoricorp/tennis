@@ -1,17 +1,21 @@
 package main
 
 import (
+	"archive/zip"
 	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"html"
 	"io"
+	"net/url"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -63,6 +67,7 @@ var readers = map[string]func(fileEntry) (string, error){
 	".html":  fromBody(htmlText),
 	".htm":   fromBody(htmlText),
 	".xhtml": fromBody(htmlText),
+	".epub":  fromBody(epubText),
 	".pdf":   readPDF,
 
 	".rtf":        readWithTextutil,
@@ -77,7 +82,6 @@ var readers = map[string]func(fileEntry) (string, error){
 	".ppt":     readWithSpotlight,
 	".ods":     readWithSpotlight,
 	".odp":     readWithSpotlight,
-	".epub":    readWithSpotlight,
 	".eml":     readWithSpotlight,
 	".emlx":    readWithSpotlight,
 }
@@ -221,6 +225,109 @@ func htmlText(body []byte) (string, error) {
 	s = htmlBlock.ReplaceAllString(s, "\n")
 	s = htmlTag.ReplaceAllString(s, " ")
 	return tidy(html.UnescapeString(s)), nil
+}
+
+// --- EPUB -------------------------------------------------------------------
+
+// epubHead is a page's head. Its title is for a browser's tab bar; a reading
+// system never shows it, and in most books it repeats the chapter heading,
+// or the book's own title, on every page.
+var epubHead = regexp.MustCompile(`(?is)<head\b.*?</head\s*>`)
+
+// epubText reads a book as its pages in reading order. An EPUB is a zip of
+// XHTML: META-INF/container.xml names the package file, whose manifest says
+// where each page is and whose spine says what order they are read in. Each
+// page is read as any other page is, less its head. What the spine leaves
+// out — stylesheets, images, the old NCX table of contents — is left out,
+// and so is the newer table of contents, the navigation document, which
+// many books put in the spine: its lines are the chapter headings over again.
+func epubText(body []byte) (string, error) {
+	zr, err := zip.NewReader(bytes.NewReader(body), int64(len(body)))
+	if err != nil {
+		return "", fmt.Errorf("not a zip: %w", err)
+	}
+	parts := make(map[string]*zip.File, len(zr.File))
+	for _, f := range zr.File {
+		parts[f.Name] = f
+	}
+	open := func(name string) (io.ReadCloser, error) {
+		f := parts[name]
+		if f == nil {
+			return nil, fmt.Errorf("no %s in the book", name)
+		}
+		return f.Open()
+	}
+
+	var container struct {
+		Rootfiles []struct {
+			Path string `xml:"full-path,attr"`
+		} `xml:"rootfiles>rootfile"`
+	}
+	if err := decodePart(open, "META-INF/container.xml", &container); err != nil {
+		return "", err
+	}
+	if len(container.Rootfiles) == 0 || container.Rootfiles[0].Path == "" {
+		return "", errors.New("META-INF/container.xml names no package file")
+	}
+	opf := container.Rootfiles[0].Path
+	var pkg struct {
+		Items []struct {
+			ID         string `xml:"id,attr"`
+			Href       string `xml:"href,attr"`
+			Properties string `xml:"properties,attr"`
+		} `xml:"manifest>item"`
+		Spine []struct {
+			IDRef string `xml:"idref,attr"`
+		} `xml:"spine>itemref"`
+	}
+	if err := decodePart(open, opf, &pkg); err != nil {
+		return "", err
+	}
+	// An href is a URL relative to the package file's own folder.
+	hrefs := make(map[string]string, len(pkg.Items))
+	nav := map[string]bool{}
+	for _, it := range pkg.Items {
+		href, _, _ := strings.Cut(it.Href, "#")
+		if u, err := url.PathUnescape(href); err == nil {
+			href = u
+		}
+		hrefs[it.ID] = path.Join(path.Dir(opf), href)
+		nav[it.ID] = slices.Contains(strings.Fields(it.Properties), "nav")
+	}
+
+	// Pages compress well, so the cap on the zip is no cap on what they
+	// expand to; the pages together are held to the same cap the file was.
+	var pages []string
+	left := int64(maxDocumentSize)
+	for _, ref := range pkg.Spine {
+		name := hrefs[ref.IDRef]
+		switch {
+		case name == "":
+			return "", fmt.Errorf("%s: the spine names %q, which the manifest does not list", opf, ref.IDRef)
+		case nav[ref.IDRef]:
+			continue
+		}
+		rc, err := open(name)
+		if err != nil {
+			return "", err
+		}
+		page, err := io.ReadAll(io.LimitReader(rc, left+1))
+		rc.Close()
+		if err != nil {
+			return "", fmt.Errorf("%s: %w", name, err)
+		}
+		if left -= int64(len(page)); left < 0 {
+			return "", fmt.Errorf("its pages come to more than the %dMB cap", maxDocumentSize/(1<<20))
+		}
+		text, err := htmlText(epubHead.ReplaceAll(page, nil))
+		if err != nil {
+			return "", fmt.Errorf("%s: %w", name, err)
+		}
+		if text != "" {
+			pages = append(pages, text)
+		}
+	}
+	return strings.Join(pages, "\n\n"), nil
 }
 
 // --- external readers --------------------------------------------------------
