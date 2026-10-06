@@ -880,6 +880,28 @@ func TestImportFilesPassesOverDependenciesAndIgnored(t *testing.T) {
 	}
 }
 
+// A file with nothing in it, or nothing but blank lines, is passed over the
+// way a photo is: counted, not indexed, not carded, not complained about.
+func TestImportFilesPassesOverEmptyFiles(t *testing.T) {
+	dir := writeTree(t, map[string]string{
+		"real.md": "real notes", "empty.md": "", "blank.txt": "  \n\n\t\n", "pkg/__init__.py": "",
+	})
+	var warnings []string
+	sink := &docSink{}
+	var texts []string
+	sink.capture = func(_, text string, _ map[string]any) { texts = append(texts, text) }
+	rep, err := importPath(dir, formatAuto, perTurn, defaultExt, sink, func(msg string) { warnings = append(warnings, msg) }, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(texts) != 1 || texts[0] != "real notes" {
+		t.Errorf("indexed %q, want real.md alone", texts)
+	}
+	if rep["skipped_files"] != 3 || len(warnings) != 0 {
+		t.Errorf("skipped_files %v, warnings %v; want 3 and none", rep["skipped_files"], warnings)
+	}
+}
+
 // The folder a person names is the folder they mean, whatever it is called.
 func TestImportFilesReadsANamedBuildFolder(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "build")

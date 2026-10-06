@@ -50,8 +50,8 @@ type fileEntry struct {
 const maxDocumentSize = 100 << 20
 
 // errNotText marks a file with no text to index — an image, a sound, an
-// archive. It is counted but not reported: a folder of photos is not a
-// folder of mistakes.
+// archive, a file with nothing in it. It is counted but not reported: a
+// folder of photos is not a folder of mistakes.
 var errNotText = errors.New("no text to index")
 
 // unavailable says a reader exists for this format, but not on this machine.
@@ -168,6 +168,13 @@ func readPlain(f fileEntry) (string, error) {
 	}
 	if isBinary(body) {
 		return "", errors.New("binary content")
+	}
+	// An empty file, or one of blank lines, has nothing to find. Indexed, it
+	// would be a document no search can reach and a card with nothing on
+	// it — a summarizer call apiece when a key is set, for every
+	// __init__.py and every Finder Icon\r in the folder.
+	if strings.TrimSpace(strings.TrimPrefix(string(body), "\ufeff")) == "" {
+		return "", errNotText
 	}
 	return string(body), nil
 }

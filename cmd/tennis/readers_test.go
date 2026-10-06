@@ -80,6 +80,11 @@ func TestFileTextGate(t *testing.T) {
 	if _, err := fileText(entry("blob.bin", []byte("\x00\x01\x02"))); err == nil || err.Error() != "binary content" {
 		t.Errorf("an unknown binary should be reported as one, got %v", err)
 	}
+	for name, body := range map[string]string{"__init__.py": "", "blank.txt": "  \n\n \t\r\n", "bom.md": "\ufeff\n", "Icon\r": ""} {
+		if _, err := fileText(entry(name, []byte(body))); !errors.Is(err, errNotText) {
+			t.Errorf("%q holds no text, and should be passed over quietly; got %v", name, err)
+		}
+	}
 	if text, err := fileText(entry("budget.xlsx", testWorkbook(t))); err != nil || !strings.Contains(text, "Rent (monthly)") {
 		t.Errorf("a workbook should come out as its cells: %q, %v", text, err)
 	}
