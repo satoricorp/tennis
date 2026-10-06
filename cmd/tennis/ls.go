@@ -18,7 +18,8 @@ import (
 //
 // It groups by session rather than listing documents, because import stores one
 // document per turn by default: a flat listing answers a question nobody asked,
-// thirty thousand rows deep. --docs gives the flat view.
+// thirty thousand rows deep. A file has no session and is a row of its own,
+// in among the sessions by date. --docs gives the flat view.
 func cmdLS(args []string) error {
 	fs_ := flag.NewFlagSet("ls", flag.ExitOnError)
 	dbPath := fs_.String("db", defaultDB(), "database file")
@@ -63,6 +64,11 @@ func cmdLS(args []string) error {
 	opts := tennis.ListOptions{
 		Filter: filter, Limit: *limit, Offset: *offset, SortBy: *sortBy, Asc: *asc,
 	}
+	// A conversation has a created date and a file only a modified one, so
+	// sorting by created alone would put every file after every conversation.
+	if opts.SortBy == "created" {
+		opts.SortFallback = "modified"
+	}
 
 	if *docs {
 		return listDocuments(ctx, ns, opts, *offset, *asJSON)
@@ -88,20 +94,37 @@ func listSessions(ctx context.Context, ns *tennis.Namespace, opts tennis.ListOpt
 	fmt.Println(newStyler(os.Stdout).dim(fmt.Sprintf("%-16s %-12s %6s  %s", "DATE", "SOURCE", "DOCS", "TITLE")))
 	for _, g := range groups {
 		title := attrString(g.Attributes, "title")
+		source := attrString(g.Attributes, "source")
+		if g.Ungrouped {
+			// A file is known by its name, and comes from nowhere but itself.
+			if name := attrString(g.Attributes, "name"); name != "" {
+				title = name
+			}
+			if source == "" {
+				source = "file"
+			}
+		}
 		if title == "" {
 			title = g.Key
 		}
 		fmt.Printf("%-16s %-12s %6d  %s\n",
 			attrDate(g.Attributes, opts.SortBy),
-			truncate(attrString(g.Attributes, "source"), 12),
+			truncate(source, 12),
 			g.Documents, truncate(title, 60))
 	}
 
-	total, err := ns.CountGroups(ctx, "session", opts.Filter)
+	sessions, files, err := ns.CountGroups(ctx, "session", opts.Filter)
 	if err != nil {
 		return err
 	}
-	printTally(len(groups)+offset, total, "sessions")
+	what := "sessions and files"
+	switch {
+	case files == 0:
+		what = "sessions"
+	case sessions == 0:
+		what = "files"
+	}
+	printTally(len(groups)+offset, sessions+files, what)
 	return nil
 }
 

@@ -212,6 +212,32 @@ tennis search "auth" --json                        # full results with scores an
 ]
 ```
 
+### `ls` — see what's there
+
+```bash
+tennis ls                          # sessions and files, newest first
+tennis ls chatgpt                  # one source, short for --where source=chatgpt
+tennis ls --where project=tennis   # filter by any attribute
+tennis ls --docs                   # every document, one row each
+tennis ls -n 0                     # all of it, not just the newest 25
+tennis ls --json
+```
+
+```
+$ tennis ls
+DATE             SOURCE         DOCS  TITLE
+2026-08-17 09:00 claude-code      14  Key rotation
+2026-08-12 09:00 file              1  config.md
+2026-08-10 09:00 file              1  auth.md
+2026-08-09 14:32 chatgpt           2  Wash sales
+
+4 sessions and files
+```
+
+A conversation is one row however many turns it was stored as, and `DOCS` is how many. A file has no session, so it is a row of its own, dated by when it was last modified and listed among the conversations by date — after the quick start above, `tennis ls` lists the three notes. `--docs` drops the grouping and lists every document, one row per turn and per file. `--sort <attribute>` and `--asc` change the order; `-n` and `--offset` page through.
+
+`ls` reads metadata only, never the text, so it stays fast on an archive that is mostly transcript. With `--json` it prints the same rows; a file's row is marked `"ungrouped": true` and carries the file's own attributes.
+
 ### `ns` — namespaces
 
 ```bash

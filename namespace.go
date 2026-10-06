@@ -208,8 +208,13 @@ type DocumentInfo struct {
 // GroupInfo is one value of a grouping attribute and what sits under it.
 // Attributes carries the fields that are constant within the group — a title
 // and a source do not vary between the turns of one conversation.
+//
+// A document with no value for the attribute is a group of one: Ungrouped is
+// set, Key is the document's ID, and Attributes are all of its own, since
+// every field is constant within a group of one.
 type GroupInfo struct {
 	Key        string         `json:"key"`
+	Ungrouped  bool           `json:"ungrouped,omitempty"`
 	Documents  int            `json:"documents"`
 	Chunks     int            `json:"chunks"`
 	Attributes map[string]any `json:"attributes,omitempty"`
@@ -226,6 +231,13 @@ type ListOptions struct {
 	// chronologically and one holding free text orders lexically.
 	SortBy string
 	Asc    bool
+
+	// SortFallback names an attribute to order by where a document has no
+	// SortBy. A conversation has a created date and a file only a modified
+	// one; with SortBy "created" and SortFallback "modified" the two
+	// interleave by date, rather than every file sorting after every
+	// conversation.
+	SortFallback string
 }
 
 // List returns document metadata, newest first.
@@ -235,7 +247,7 @@ type ListOptions struct {
 // of this call is that it stays cheap as the corpus grows, which the scan
 // behind Query does not.
 func (n *Namespace) List(ctx context.Context, opts ListOptions) ([]DocumentInfo, error) {
-	sortPath, limit, err := listPlan(&opts, "created")
+	sortPath, fallbackPath, limit, err := listPlan(&opts, "created")
 	if err != nil {
 		return nil, err
 	}
@@ -244,13 +256,14 @@ func (n *Namespace) List(ctx context.Context, opts ListOptions) ([]DocumentInfo,
 		return nil, err
 	}
 	args = append(args, limit, opts.Offset)
+	sortBy := sortExpr(sortPath, fallbackPath)
 
 	rows, err := n.db.sql.QueryContext(ctx, `
 		SELECT d.id, d.attrs, LENGTH(d.text),
 		       (SELECT COUNT(*) FROM chunks c WHERE c.ns = d.ns AND c.doc_id = d.id)
 		FROM docs d
 		WHERE d.ns = ?`+where+`
-		ORDER BY (`+sortPath+` IS NULL), `+sortPath+` `+listDirection(opts)+`, d.id
+		ORDER BY (`+sortBy+` IS NULL), `+sortBy+` `+listDirection(opts)+`, d.id
 		LIMIT ? OFFSET ?`, args...)
 	if err != nil {
 		return nil, err
@@ -280,6 +293,11 @@ func (n *Namespace) List(ctx context.Context, opts ListOptions) ([]DocumentInfo,
 // user wanted to know which conversations they have. Grouping is what makes a
 // listing readable at that granularity.
 //
+// A document with no value for the attribute is not dropped: it comes back as
+// a group of its own, ordered among the rest. A folder of notes has no
+// sessions, and a listing that left it out would report an empty namespace
+// that is not.
+//
 // The extra fields are aggregated with MIN, which is exact rather than
 // arbitrary for values that do not vary within a group — which is the case for
 // every attribute carried here.
@@ -288,7 +306,7 @@ func (n *Namespace) Groups(ctx context.Context, attr string, opts ListOptions, e
 	if err != nil {
 		return nil, err
 	}
-	sortPath, limit, err := listPlan(&opts, "created")
+	sortPath, fallbackPath, limit, err := listPlan(&opts, "created")
 	if err != nil {
 		return nil, err
 	}
@@ -307,14 +325,25 @@ func (n *Namespace) Groups(ctx context.Context, attr string, opts ListOptions, e
 		selects += ", MIN(" + path + ")"
 	}
 
+	fallbackMax := "NULL"
+	if fallbackPath != "" {
+		fallbackMax = "MAX(" + fallbackPath + ")"
+	}
+	sortBy := "MAX(" + sortExpr(sortPath, fallbackPath) + ")"
+
+	// A document without the attribute is grouped by its own ID. Grouping on
+	// whether the attribute is missing as well keeps that apart from a group
+	// whose value happens to equal some document's ID.
 	rows, err := n.db.sql.QueryContext(ctx, `
-		SELECT `+groupPath+` AS grp, COUNT(*),
+		SELECT COALESCE(`+groupPath+`, d.id) AS grp, `+groupPath+` IS NULL AS single,
+		       COUNT(*),
 		       SUM((SELECT COUNT(*) FROM chunks c WHERE c.ns = d.ns AND c.doc_id = d.id)),
-		       MAX(`+sortPath+`)`+selects+`
+		       MAX(`+sortPath+`), `+fallbackMax+`,
+		       MIN(CASE WHEN `+groupPath+` IS NULL THEN d.attrs END)`+selects+`
 		FROM docs d
-		WHERE d.ns = ? AND `+groupPath+` IS NOT NULL`+where+`
-		GROUP BY grp
-		ORDER BY MAX(`+sortPath+`) `+listDirection(opts)+`, grp
+		WHERE d.ns = ?`+where+`
+		GROUP BY single, grp
+		ORDER BY (`+sortBy+` IS NULL), `+sortBy+` `+listDirection(opts)+`, grp, single
 		LIMIT ? OFFSET ?`, args...)
 	if err != nil {
 		return nil, err
@@ -324,11 +353,13 @@ func (n *Namespace) Groups(ctx context.Context, attr string, opts ListOptions, e
 	var out []GroupInfo
 	for rows.Next() {
 		var (
-			g      GroupInfo
-			sortAt any
-			vals   = make([]any, len(extra))
+			g          GroupInfo
+			sortAt     any
+			fallbackAt any
+			ownAttrs   sql.NullString
+			vals       = make([]any, len(extra))
 		)
-		dest := []any{&g.Key, &g.Documents, &g.Chunks, &sortAt}
+		dest := []any{&g.Key, &g.Ungrouped, &g.Documents, &g.Chunks, &sortAt, &fallbackAt, &ownAttrs}
 		for i := range vals {
 			dest = append(dest, &vals[i])
 		}
@@ -336,8 +367,16 @@ func (n *Namespace) Groups(ctx context.Context, attr string, opts ListOptions, e
 			return nil, err
 		}
 		g.Attributes = map[string]any{}
+		if g.Ungrouped {
+			if err := decodeAttrs(ownAttrs.String, &g.Attributes); err != nil {
+				return nil, err
+			}
+		}
 		if sortAt != nil {
 			g.Attributes[opts.SortBy] = sortAt
+		}
+		if fallbackAt != nil {
+			g.Attributes[opts.SortFallback] = fallbackAt
 		}
 		for i, key := range extra {
 			if vals[i] != nil {
@@ -361,24 +400,27 @@ func (n *Namespace) Count(ctx context.Context, filter Filter) (int, error) {
 	return count, err
 }
 
-// CountGroups reports how many distinct values of an attribute are present.
-func (n *Namespace) CountGroups(ctx context.Context, attr string, filter Filter) (int, error) {
+// CountGroups reports the rows Groups would return without a limit: how many
+// distinct values of an attribute are present, and how many documents have no
+// value for it and so stand as groups of their own.
+func (n *Namespace) CountGroups(ctx context.Context, attr string, filter Filter) (groups, ungrouped int, err error) {
 	path, err := attrPath(attr)
 	if err != nil {
-		return 0, err
+		return 0, 0, err
 	}
 	where, args, err := listFilter(n.name, filter)
 	if err != nil {
-		return 0, err
+		return 0, 0, err
 	}
-	var count int
 	err = n.db.sql.QueryRowContext(ctx,
-		`SELECT COUNT(DISTINCT `+path+`) FROM docs d WHERE d.ns = ? AND `+path+` IS NOT NULL`+where,
-		args...).Scan(&count)
-	return count, err
+		`SELECT COUNT(DISTINCT `+path+`), COUNT(*) - COUNT(`+path+`) FROM docs d WHERE d.ns = ?`+where,
+		args...).Scan(&groups, &ungrouped)
+	return groups, ungrouped, err
 }
 
-func listPlan(opts *ListOptions, defaultSort string) (sortPath string, limit int, err error) {
+// listPlan resolves the ordering and page size a listing asked for. The
+// fallback path is empty when no SortFallback was given.
+func listPlan(opts *ListOptions, defaultSort string) (sortPath, fallbackPath string, limit int, err error) {
 	if opts.SortBy == "" {
 		opts.SortBy = defaultSort
 	}
@@ -389,8 +431,24 @@ func listPlan(opts *ListOptions, defaultSort string) (sortPath string, limit int
 	case limit < 0:
 		limit = -1 // SQLite reads a negative LIMIT as unbounded
 	}
-	sortPath, err = attrPath(opts.SortBy)
-	return sortPath, limit, err
+	if sortPath, err = attrPath(opts.SortBy); err != nil {
+		return "", "", 0, err
+	}
+	if opts.SortFallback != "" && opts.SortFallback != opts.SortBy {
+		if fallbackPath, err = attrPath(opts.SortFallback); err != nil {
+			return "", "", 0, err
+		}
+	}
+	return sortPath, fallbackPath, limit, nil
+}
+
+// sortExpr is what a listing orders by: the sort attribute, or the fallback
+// where a document has none.
+func sortExpr(sortPath, fallbackPath string) string {
+	if fallbackPath == "" {
+		return sortPath
+	}
+	return "COALESCE(" + sortPath + ", " + fallbackPath + ")"
 }
 
 func listFilter(ns string, f Filter) (string, []any, error) {
