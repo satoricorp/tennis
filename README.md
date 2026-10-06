@@ -246,7 +246,7 @@ tennis serve                                   # local HTTP API on 127.0.0.1:881
 | Flag | Meaning |
 |---|---|
 | `--db <path>` | database file (default `~/.tennis/db.sqlite`, or `$TENNIS_DB`) |
-| `--ns <name>` | namespace for `add`, `search` and `rm` (default `context`, or `$TENNIS_NS`) |
+| `--ns <name>` | namespace for `add`, `ls`, `search` and `rm` (default `context`, or `$TENNIS_NS`) |
 | `--json` | machine-readable output on stdout; progress goes to stderr |
 | `-k <n>` | how many results (`search` only, default 1; `-n` is an alias) |
 | `--mode` | `hybrid` (default), `keyword`, `semantic` |

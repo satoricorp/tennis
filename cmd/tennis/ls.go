@@ -23,7 +23,7 @@ func cmdLS(args []string) error {
 	fs_ := flag.NewFlagSet("ls", flag.ExitOnError)
 	dbPath := fs_.String("db", defaultDB(), "database file")
 	asJSON := fs_.Bool("json", false, "machine-readable output")
-	nsName := fs_.String("ns", defaultNamespace, "namespace")
+	nsName := fs_.String("ns", "", "namespace (default "+defaultNamespace+", or $TENNIS_NS)")
 	limit := fs_.Int("n", 25, "how many to list (0 for all)")
 	offset := fs_.Int("offset", 0, "skip this many")
 	where := fs_.String("where", "", "attribute filter, e.g. source=chatgpt")

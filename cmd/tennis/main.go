@@ -72,7 +72,7 @@ SOURCES
 COMMON FLAGS
   --db <path>    database file (default ~/.tennis/db.sqlite, or $TENNIS_DB)
   --cards <dir>  where summary cards are written (default ~/tennis, or $TENNIS_CARDS)
-  --ns <name>    namespace for add, search and rm (default ` + defaultNamespace + `, or $TENNIS_NS)
+  --ns <name>    namespace for add, ls, search and rm (default ` + defaultNamespace + `, or $TENNIS_NS)
   --json         machine-readable output
 
 Run 'tennis <command> --help' for command flags.
