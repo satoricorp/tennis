@@ -14,17 +14,13 @@
   <a href="LICENSE"><img src="https://img.shields.io/github/license/satoricorp/tennis" alt="License"></a>
 </p>
 
-# Tennis
-
-Tennis is a command-line tool and Go library for searching text on your own computer. You give it files or your AI chat history, and it stores everything in one SQLite file. Each search looks for your exact words and for passages with the same meaning, then merges both into one ranked list, with no server and no API key.
-
-[Documentation](https://satoricorp.github.io/tennis/docs) · [Discord](https://discord.gg/JpAggvxJJ)
+Tennis is a CLI for indexing & searching context locally. Context can include files, chat history, etc., and it embeds and stores everything locally in SQLite. Each search is semantic (searches for meaning) and produces results without a server or API key.
 
 # Getting Started
 
 ## Install
 
-Tennis runs on macOS and Linux, on Intel/AMD (`amd64`) and ARM (`arm64`). Pick one of these three ways.
+Tennis runs on macOS and Linux.
 
 **Option 1: with Go** (needs Go 1.25 or newer)
 
@@ -34,18 +30,8 @@ go install github.com/satoricorp/tennis/cmd/tennis@latest
 
 This puts `tennis` in `$(go env GOPATH)/bin`. That folder must be on your `PATH`.
 
-**Option 2: download a release**
 
-```bash
-VERSION=0.2.0                                               # the newest version on the Releases page
-OS=$(uname -s | tr '[:upper:]' '[:lower:]')                 # darwin or linux
-ARCH=$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/')   # amd64 or arm64
-curl -fL -o tennis.tar.gz "https://github.com/satoricorp/tennis/releases/download/v${VERSION}/tennis_${VERSION}_${OS}_${ARCH}.tar.gz"
-tar -xzf tennis.tar.gz tennis
-mkdir -p ~/.local/bin && mv tennis ~/.local/bin/            # any folder on your PATH works
-```
-
-**Option 3: build from source**
+**Option 2: build from source**
 
 ```bash
 git clone https://github.com/satoricorp/tennis
@@ -53,17 +39,15 @@ cd tennis
 CGO_ENABLED=0 go build -o tennis ./cmd/tennis
 ```
 
-`CGO_ENABLED=0` makes one self-contained binary with no C libraries. Tennis needs none.
-
-Check that it worked:
+NOTE: `CGO_ENABLED=0` makes one self-contained binary with no C libraries.
 
 ```bash
 tennis version
 ```
 
-The first time you add something, Tennis downloads its embedding model once (about 123MB) into `~/.cache/tennis`. After that, search never uses the network.
+The first time you index something, Tennis downloads its embedding model (about 123MB) into `~/.cache/tennis`. That's the only time Tennis needs network access.
 
-To read PDFs on Linux, also install `pdftotext` (for example `sudo apt install poppler-utils`). On a Mac, Tennis uses `pdftotext` if you have it and the built-in Spotlight importer if you don't.
+To read PDFs on Linux, also install `pdftotext` (for example `sudo apt install poppler-utils`). On a Mac, Tennis defaults to `pdftotext`, with the Spotlight importer as a fallback.
 
 # Examples
 
@@ -74,7 +58,6 @@ Index a folder of notes:
 ```bash
 $ tennis add ~/Documents/notes
 tennis: created namespace "context" bound to builtin:potion-retrieval-32M
-tennis: no ANTHROPIC_API_KEY or OPENAI_API_KEY; cards will carry the opening message instead of a summary
 tennis: /Users/you/Documents/notes: reading plain files
 imported 3, skipped 0 unchanged, 3 chunks in "context", 3 cards in /Users/you/tennis
 ```
@@ -83,9 +66,9 @@ What happened:
 
 - Tennis created a **namespace** called `context`. A namespace is a separate collection of documents, and `context` is the default one.
 - It read the 3 files, split them into chunks, and stored them in `~/.tennis/db.sqlite`.
-- It wrote one markdown summary **card** per file into `~/tennis`. The line about API keys is only about those cards; search never needs a key.
+- It wrote one markdown summary **card** per file into `~/tennis`. These are human readable markdown files you can explore to understand what you've indexed without any tools.
 
-Search it:
+Run search:
 
 ```bash
 $ tennis search "keep me signed in"
@@ -97,7 +80,7 @@ $ tennis search "keep me signed in"
   auth.md [2026-10-08] 0.0328
 ```
 
-You get the best match, printed in full. Under it are the file name, the file's date, and the score.
+You get the best match, printed in full. The last line includes the file name, date the file was edited, and a confidence score.
 
 Ask for more results with `-k`:
 
@@ -122,13 +105,12 @@ $ tennis search "keep me signed in" -k 3
     over the defaults.
 ```
 
-The tag at the end of each line says which search found the result. `kw#1` means keyword search ranked it first. `sem#2` means meaning-based search ranked it second. `auth.md` was found by both, so it scores highest. The other two were found only by meaning, so treat them as weaker matches.
+Note the tag in these examples. `kw#1` denotes that keyword search ranked higher than semantic search, wehre `sem#2` means semantic search ranked higher.
 
-Run `add` again and unchanged files are skipped:
+Running `add` multiple times is non-destructive. Tennis skips any files that 1. it already knows about and 2. haven't changed:
 
 ```bash
 $ tennis add ~/Documents/notes
-tennis: no ANTHROPIC_API_KEY or OPENAI_API_KEY; cards will carry the opening message instead of a summary
 tennis: /Users/you/Documents/notes: reading plain files
 imported 0, skipped 3 unchanged, 0 chunks in "context"
 ```
@@ -146,8 +128,6 @@ DATE             SOURCE         DOCS  TITLE
 ```
 
 ## Full Example
-
-This walks through the main features in order. Replace the paths with your own.
 
 ```bash
 # 1. Import AI chat history. Tennis detects the format from the contents.
@@ -185,14 +165,27 @@ tennis rm ~/work/handbook/old-policy.md --ns work
 tennis ns rm work
 ```
 
-Some notes on what these commands do:
+Some notes on what these commands do.
 
-- **Formats.** `add` works out what a path is. If it guesses wrong, name it with `--chatgpt`, `--claude`, `--claude-code`, `--codex`, or `--files`.
-- **Turns.** Chat history is stored one message per document, so a search finds the exact message. `tennis ls` groups messages back into one row per conversation.
-- **Attributes.** Every document carries attributes you can filter on with `--where`. Files have `path`, `name`, `size`, `modified`. Chat messages have `source`, `session`, `role`, `title`, `created`. Claude Code and Codex messages also have `project` (the repo the session started in), `cwd`, and `worktree` when there was one. Claude Code messages also have `branch`, and a subagent's turns have `subagent`.
-- **Filters.** `--where` takes `key=value`, `key!=value`, `key>value`, `key>=value`, `key<value`, `key<=value`, joined with commas (all must match). Put a value in double quotes when it contains a comma: `--where 'path="/Users/you/Budget, 2026.md"'`.
-- **Cards.** Every file and conversation also gets a markdown card in `~/tennis`. Set `ANTHROPIC_API_KEY` or `OPENAI_API_KEY` and each card gets a short summary written by a model. Without a key, the card holds the opening lines instead. A card's last line is the command that prints the whole record. Use `--no-cards` to skip cards, or `--cards <dir>` to put them elsewhere.
-- **Defaults.** The database is `~/.tennis/db.sqlite` (change it with `--db` or `$TENNIS_DB`). The namespace is `context` (change it with `--ns` or `$TENNIS_NS`).
+Chat history is stored one message per document, so a search finds the exact message. `tennis ls` groups messages back into one row per conversation.
+
+Every document has attributes you can filter with `--where`. Join comparisons with commas (all must match): `=`, `!=`, `>`, `>=`, `<`, `<=`. Quote a value that contains a comma: `--where 'path="/Users/you/Budget, 2026.md"'`.
+
+| Documents | Attributes |
+|---|---|
+| Files | `path`, `name`, `size`, `modified` |
+| Chat messages | `source`, `session`, `role`, `title`, `created` |
+| Claude Code and Codex | also `project` (the repo the session started in), `cwd`, and `worktree` when there was one |
+| Claude Code | also `branch`; a subagent's turns have `subagent` |
+
+Every file/chat gets its own markdown card. With `ANTHROPIC_API_KEY` or `OPENAI_API_KEY` set, the card contains a short summary otherwise its the header of the document.
+
+| Setting | Default | Change with |
+|---|---|---|
+| Format | guessed based on path | `--chatgpt`, `--claude`, `--claude-code`, `--codex`, `--files` |
+| Database | `~/.tennis/db.sqlite` | `--db` or `$TENNIS_DB` |
+| Namespace | `context` | `--ns` or `$TENNIS_NS` |
+| Cards | `~/tennis` | `--cards <dir>` or `--no-cards` |
 
 Run `tennis --help` for the main commands and `tennis --agents` for every command.
 
@@ -200,20 +193,17 @@ Run `tennis --help` for the main commands and `tennis --agents` for every comman
 
 ## What tennis is great for
 
-- **Searching your own files on one machine.** It finds exact terms (names, IDs, error codes) and paraphrases in the same search.
-- **Searching AI chat history.** It reads ChatGPT and Claude exports and the local Claude Code and Codex history, and none of it leaves your machine.
-- **Giving a program or AI agent a local memory.** Write documents in and query them back through the Go library, a local HTTP API, or the CLI with `--json`.
-- **Working offline.** The model runs on your machine. Search never calls an API.
-- **Collections up to about 100,000 chunks.** On an Apple M4, a search over about 117,000 chunks (74,000 chat messages) takes about 2 seconds.
+- **Working offline.** Tennis runs on your machine and never makes network calls.
+- **Searching files and chat history locally** It finds exact terms (names, IDs, error codes) and paraphrases in the same search.
+- **Free, local knowledge base.** Write documents in and query them back through the Go library, a local HTTP API, or the CLI with `--json`.
+- **Speed.** On an Apple M4, a search over about 117,000 chunks (74,000 chat messages) takes about 2 seconds.
 
 ## What tennis is not great for
 
-- **Millions of documents, or answers in milliseconds.** Meaning-based search compares the query with every stored chunk. Time grows in step with the size of the collection.
-- **A shared server.** The HTTP API has no authentication. It is meant for programs on the same machine.
-- **Telling you when nothing matches.** There is no relevance cutoff. A search always returns up to `-k` results, even weak ones. Use the score and the `kw#`/`sem#` tags to judge.
-- **Chinese, Japanese, and Korean keyword search.** The keyword index can't split those languages into words, so keyword search finds nothing in them. Meaning-based search still works. This is tracked in [issue #1](https://github.com/satoricorp/tennis/issues/1).
-- **Images, audio, and video.** Tennis indexes text only. A scanned PDF with no text layer has nothing to index.
-- **The best possible meaning-based results.** The built-in model is small and fast, but weaker than large hosted models. You can switch a namespace to OpenAI embeddings (see below).
+- **Millions of documents** Tennis is not optimized for massive document stores, and is ideal for individual power users.
+- **A shared server.** Tennis doesn't have any authentication features, and should stay sandboxed on a single machine.
+- **Chinese, Japanese, and Korean languages.** The keyword index can't split those languages into words, however, semantic search should work. Follow along here: [issue #1](https://github.com/satoricorp/tennis/issues/1).
+- **Images, audio, and video.** Tennis indexes text only.
 - **Windows.** Only macOS and Linux are supported.
 
 ## Embedding tennis with your application
@@ -268,7 +258,7 @@ tennis serve                        # listens on 127.0.0.1:8817
 | `POST` | `/v1/namespaces/{ns}/query` | `{"text", "top_k", "mode", "where"}` | `{"results": [...]}` |
 | `POST` | `/v1/namespaces/{ns}/delete` | `{"ids": [...]}` | `{"deleted": n}` |
 
-The first write to a namespace creates it. `where` uses the same syntax as the CLI's `--where`.
+Namespaces are created on the first write. `where` uses the same syntax as the CLI's `--where`.
 
 ```bash
 curl -s localhost:8817/v1/namespaces/notes/write -d '{"documents": [{"id": "a1", "text": "make the login flow remember the user"}]}'
@@ -306,33 +296,42 @@ When you add a folder, Tennis skips these:
 
 Use `--ext .go,.md` to read only some extensions.
 
-## Specifics about the vector architecture
+## Specifics about the Tennis vector architecture
 
 An **embedding** is a list of numbers that represents what a piece of text means. Texts with similar meanings get similar lists. Tennis stores one embedding per chunk of text and compares them with the embedding of your query.
 
-- **Model.** The default is [`potion-retrieval-32M`](https://huggingface.co/minishlab/potion-retrieval-32M) from Minish Lab. It is a *static* model: a table holding one 512-number vector for each token in its vocabulary. To embed a text, Tennis splits it into tokens, looks up each token's vector, averages them, and scales the result to length 1. No neural network runs, so Tennis needs no machine-learning runtime or C libraries.
-- **Download.** The model downloads once from Hugging Face into `~/.cache/tennis/models/`. Tennis checks the file against a SHA-256 checksum pinned in [`embed/models.go`](embed/models.go) and refuses a file that doesn't match.
-- **Quality.** On the MTEB retrieval benchmark the model scores 35.06, against 42.92 for the common `all-MiniLM-L6-v2`. Keyword search covers much of that gap, because the queries a small model handles worst (exact names, IDs, code) are the ones keyword search handles best.
-- **Other models.** `--model potion-base-8M` is smaller (256 numbers per vector, 29MB) and less accurate. `--openai text-embedding-3-small` (1536 numbers) or `--openai text-embedding-3-large` (3072) uses OpenAI instead. That needs `OPENAI_API_KEY` and sends your text to OpenAI.
-- **One model per namespace.** A namespace records its model and vector size when it is created. Opening it with a different model is an error, because vectors from different models cannot be compared. To change models, create a new namespace and add your files again.
-- **Chunks.** Each document is split into chunks of about 1,000 characters that overlap by 100. Splits fall on paragraph or sentence boundaries when possible. Each chunk gets its own vector, because the average of a long text's tokens says little about any one part of it.
-- **Storage.** Everything lives in one SQLite file, `~/.tennis/db.sqlite` by default. Documents, their attributes (as JSON), and their chunks are ordinary tables. Each chunk's vector is stored next to its text as 32-bit floats.
-- **Comparing vectors.** There is no approximate index. A search computes the cosine similarity between the query vector and every chunk vector in the namespace that passes the filters. Results are exact, and time grows in step with the number of chunks.
-- **Re-adding.** Each document stores a hash of its text and attributes. A document whose hash hasn't changed is skipped, not embedded again.
+The default, [`potion-retrieval-32M`](https://huggingface.co/minishlab/potion-retrieval-32M) from Minish Lab, is a table of one 512-number vector per vocabulary token. Tennis splits the text into tokens, looks each one up, averages the vectors, and scales the result to length 1.
+
+| Model | Numbers per vector | Use it with |
+|---|---|---|
+| `potion-retrieval-32M` | 512 | the default |
+| `potion-base-8M` | 256 | `--model potion-base-8M` |
+| `text-embedding-3-small` | 1536 | `--openai text-embedding-3-small` |
+| `text-embedding-3-large` | 3072 | `--openai text-embedding-3-large` |
+
+On the MTEB retrieval benchmark, `potion-retrieval-32M` scores 35.06, against 42.92 for `all-MiniLM-L6-v2`. Keyword search covers much of that gap on exact names, IDs, and code. `potion-base-8M` is the same kind of model, smaller (29MB) and less accurate. The OpenAI models need `OPENAI_API_KEY` and send your text to OpenAI.
+
+The built-in model downloads once from Hugging Face into `~/.cache/tennis/models/`. Tennis checks the file against the SHA-256 checksum in [`embed/models.go`](embed/models.go) and refuses any non-matching files. A namespace requires the model it was created with, and opening it with another model throws an error (i.e. the vectors can't be compared). To switch, create a new namespace and add the files again.
+
+Each document is split into chunks of about 1,000 characters that overlap by 100. Tennis attempts to find boundaries on paragraphs or sentences when possible. Documents, attributes, and chunks live in one SQLite file, `~/.tennis/db.sqlite`, with each vector stored as 32-bit floats.
+
+A search compares the query with every chunk that passes the filters. Time grows with the number of chunks.
 
 ## Specifics about tennis search
 
-Every search runs two searches and merges them.
+Every search runs a keyword search and a semantic search, then merges both.
 
-- **Keyword search** uses [BM25](https://en.wikipedia.org/wiki/Okapi_BM25) through SQLite's FTS5 full-text index. Words are reduced to their stems, so "running" matches "run". The query's words are joined with OR. Very common words such as "the" and "in" are dropped. Search operators typed in the query are treated as plain text.
-- **Meaning-based search** compares the query's vector with every chunk's vector, as described above.
-- **Each document counts once.** Both searches keep each document's best-matching chunk and take the top 100 documents.
-- **Merging** uses reciprocal rank fusion. A document's score is `1 / (60 + rank)` for each search that found it, added together. It uses ranks rather than raw scores because BM25 scores and cosine similarities are on different scales. Ranked first by both searches, a document scores 2/61 ≈ 0.0328. Ranked first by only one, it scores 1/61 ≈ 0.0164.
-- **The text shown** is the document's best-matching chunk, preferring the meaning-based search's choice when both found it.
-- **Modes.** `--mode hybrid` (the default) runs both searches. `--mode keyword` runs only BM25, and `--mode semantic` runs only the vector search.
-- **Filters** from `--where` run before either search, so a filtered search only looks at matching documents.
-- **Result count.** The CLI shows 1 result by default (`-k` for more). The Go library returns 10 by default (`TopK`).
-- **Reading instead of searching.** `tennis search --where ...` with no query prints every matching document in full, oldest first, instead of ranking anything.
+Keyword search uses [BM25](https://en.wikipedia.org/wiki/Okapi_BM25) through SQLite's FTS5 index. Words are stemmed, so "running" matches "run", and the query's words are joined with OR. Common words such as "the" are dropped, and search operators in the query are plain text. Meaning-based search compares the query's vector with every chunk's vector.
+
+Each search keeps a document's best-matching chunk and the top 100 documents. The merged score is reciprocal rank fusion: `1 / (60 + rank)` from each search that found the document, added together. Ranks are used because BM25 and cosine similarity are on different scales. First in both scores 2/61 ≈ 0.0328. First in one scores 1/61 ≈ 0.0164. The text shown is that best chunk, preferring the meaning-based one when both searches found the document.
+
+| Mode | What runs |
+|---|---|
+| `--mode hybrid` | both searches (the default) |
+| `--mode keyword` | BM25 only |
+| `--mode semantic` | the vector search only |
+
+`--where` runs before either search. The CLI shows 1 result (`-k` for more). The Go library returns 10 (`TopK`). `tennis search --where ...` with no query prints every match in full, oldest first.
 
 # Contributing
 
@@ -346,7 +345,7 @@ You need Go 1.25 or newer, on macOS or Linux.
    scripts/fetch-test-model.sh
    ```
 
-2. Make your change, then run the same checks CI runs:
+2. Make your change. Ideally, you run the CI checks locally:
 
    ```bash
    go vet ./...
@@ -355,9 +354,9 @@ You need Go 1.25 or newer, on macOS or Linux.
    CGO_ENABLED=0 go build -o tennis ./cmd/tennis
    ```
 
-3. Write the commit subject as `area: what changed`, in lowercase, where the area is `cli`, `docs`, `www`, or `infra`. Use the body to explain why.
+3. Write good commits. If you're using Claude, please read and review your code, and make sure your commit message reflects what's changed and why.
 
-Where things are:
+File structure:
 
 | Path | What it is |
 |---|---|
@@ -371,14 +370,11 @@ Where things are:
 | `infra/` | the download host for releases (AWS CDK) |
 | `scripts/` | the installer and CI helper scripts |
 
-Ask questions in [Discord](https://discord.gg/JpAggvxJJ) or [open an issue](https://github.com/satoricorp/tennis/issues).
+[open an issue](https://github.com/satoricorp/tennis/issues).
 
 # Thanks
 
-- [Minish Lab](https://github.com/MinishLab/model2vec), for model2vec and the potion models that make embeddings possible without a neural network.
-- [modernc.org/sqlite](https://gitlab.com/cznic/sqlite), for SQLite in pure Go, which keeps Tennis a single binary.
-- [SQLite](https://sqlite.org) and its [FTS5](https://sqlite.org/fts5.html) extension, which does the keyword search.
-- [sugarme/tokenizer](https://github.com/sugarme/tokenizer), for Hugging Face tokenizers in Go.
-- [sqlite-vec](https://github.com/asg017/sqlite-vec) by Alex Garcia, for the idea that vectors can live in a SQLite file you own.
-- Cormack, Clarke, and Büttcher, for [reciprocal rank fusion](https://plg.uwaterloo.ca/~gvcormac/cormacksigir09-rrf.pdf).
-- [Poppler](https://poppler.freedesktop.org), for `pdftotext`.
+- [Minish Lab](https://github.com/MinishLab/model2vec), for model2vec and  models that make embeddings possible.
+- [SQLite](https://sqlite.org) and its [FTS5](https://sqlite.org/fts5.html) extension for keyword search.
+- [sugarme/tokenizer](https://github.com/sugarme/tokenizer), for tokenizers in Go.
+- [modernc.org/sqlite](https://gitlab.com/cznic/sqlite), for SQLite in Go.
