@@ -20,11 +20,57 @@ jobs:
       # than the module, so it would also parse the Go init templates aws-cdk
       # ships under infra/node_modules once anyone runs npm install there.
       - run: gofmt -l $(git ls-files '*.go') && test -z "$(gofmt -l $(git ls-files '*.go'))"
-      # Tests that need the 123MB model skip themselves when it is absent;
-      # everything else (chunker fuzz seeds, CLI parsing, OpenAI client,
-      # safetensors errors) runs for real.
+      # Tests that need the 123MB model skip themselves when it is absent,
+      # and that was the whole root package and every end-to-end CLI test.
+      # The model is fetched once per checksum change, verified against the
+      # SHA-256 pinned in embed/models.go, and cached.
+      - uses: actions/cache@v4
+        with:
+          path: testdata/cache
+          key: test-model-${{ runner.os }}-${{ hashFiles('embed/models.go') }}
+      - run: scripts/fetch-test-model.sh
       - run: go test ./...
       - run: CGO_ENABLED=0 go build ./cmd/tennis
+
+  # The README's "tests" badge: how much of the suite passed on main, run
+  # with the model so nothing skips. shields.io reads the result from the
+  # badges branch, which holds that one file and nothing else.
+  tests-badge:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    # Two pushes close together would race to force-push the branch; the
+    # newer run is the one whose result should stand.
+    concurrency:
+      group: tests-badge
+      cancel-in-progress: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+      - uses: actions/cache@v4
+        with:
+          path: testdata/cache
+          key: test-model-${{ runner.os }}-${{ hashFiles('embed/models.go') }}
+      - run: scripts/fetch-test-model.sh
+      # A failing suite still gets a badge, a red one, so the test run's own
+      # exit status does not stop the job.
+      - run: go test -json ./... > results.json || true
+      - run: scripts/render-test-badge.sh results.json > tests.json && cat tests.json
+      - name: Publish to the badges branch
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          mkdir badge && cp tests.json badge/ && cd badge
+          git init -q -b badges
+          git add tests.json
+          git -c user.name='github-actions[bot]' \
+              -c user.email='41898282+github-actions[bot]@users.noreply.github.com' \
+              commit -q -m "tests badge for ${GITHUB_SHA::7}"
+          git push -q -f "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" badges
 
   cross-build:
     runs-on: ubuntu-latest
@@ -50,6 +96,7 @@ jobs:
 
       - run: shellcheck -s sh scripts/install.sh
       - run: shellcheck -s bash scripts/render-manifest.sh
+      - run: shellcheck -s sh scripts/fetch-test-model.sh scripts/render-test-badge.sh
 
       # Stand up the exact key layout the release workflow publishes, serve it
       # over HTTP, and install from it the way a user would.
