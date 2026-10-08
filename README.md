@@ -14,7 +14,7 @@
   <a href="LICENSE"><img src="https://img.shields.io/github/license/satoricorp/tennis" alt="License"></a>
 </p>
 
-Tennis is a CLI for indexing & searching context locally. Context can include files, chat history, etc., and it embeds and stores everything locally in SQLite. Each search is semantic (searches for meaning) and produces results without a server or API key.
+Tennis is a CLI for indexing and searching context locally. Context can include files, chat history, and so on, and it embeds and stores everything locally in SQLite. Each search is a merged hybrid of keyword and semantic searches.
 
 # Getting Started
 
@@ -45,7 +45,7 @@ NOTE: `CGO_ENABLED=0` makes one self-contained binary with no C libraries.
 tennis version
 ```
 
-The first time you index something, Tennis downloads its embedding model (about 123MB) into `~/.cache/tennis`. That's the only time Tennis needs network access.
+The first time you index something, Tennis downloads it (about 123MB) into `~/.cache/tennis`. It also uses the network to summarize cards when `ANTHROPIC_API_KEY` or `OPENAI_API_KEY` is set, and for every `add` and `search` in an `--openai` namespace.
 
 To read PDFs on Linux, also install `pdftotext` (for example `sudo apt install poppler-utils`). On a Mac, Tennis defaults to `pdftotext`, with the Spotlight importer as a fallback.
 
@@ -58,9 +58,12 @@ Index a folder of notes:
 ```bash
 $ tennis add ~/Documents/notes
 tennis: created namespace "context" bound to builtin:potion-retrieval-32M
+tennis: summarizing cards with anthropic:claude-opus-5
 tennis: /Users/you/Documents/notes: reading plain files
 imported 3, skipped 0 unchanged, 3 chunks in "context", 3 cards in /Users/you/tennis
 ```
+
+Without `ANTHROPIC_API_KEY` or `OPENAI_API_KEY`, that line is `no ANTHROPIC_API_KEY or OPENAI_API_KEY; cards will carry the opening message instead of a summary`.
 
 What happened:
 
@@ -105,12 +108,13 @@ $ tennis search "keep me signed in" -k 3
     over the defaults.
 ```
 
-Note the tag in these examples. `kw#1` denotes that keyword search ranked higher than semantic search, wehre `sem#2` means semantic search ranked higher.
+Note the tag in these examples. `kw#1` denotes that keyword search ranked higher than semantic search, where `sem#2` means semantic search ranked it second.
 
 Running `add` multiple times is non-destructive. Tennis skips any files that 1. it already knows about and 2. haven't changed:
 
 ```bash
 $ tennis add ~/Documents/notes
+tennis: summarizing cards with anthropic:claude-opus-5
 tennis: /Users/you/Documents/notes: reading plain files
 imported 0, skipped 3 unchanged, 0 chunks in "context"
 ```
@@ -182,7 +186,7 @@ Every file/chat gets its own markdown card. With `ANTHROPIC_API_KEY` or `OPENAI_
 
 | Setting | Default | Change with |
 |---|---|---|
-| Format | guessed based on path | `--chatgpt`, `--claude`, `--claude-code`, `--codex`, `--files` |
+| Format | detected from the contents | `--chatgpt`, `--claude`, `--claude-code`, `--codex`, `--files` |
 | Database | `~/.tennis/db.sqlite` | `--db` or `$TENNIS_DB` |
 | Namespace | `context` | `--ns` or `$TENNIS_NS` |
 | Cards | `~/tennis` | `--cards <dir>` or `--no-cards` |
@@ -200,7 +204,7 @@ Run `tennis --help` for the main commands and `tennis --agents` for every comman
 
 ## What tennis is not great for
 
-- **Millions of documents** Tennis is not optimized for massive document stores, and is ideal for individual power users.
+- **Millions of documents.** Tennis is not optimized for massive document stores, and is ideal for individual power users.
 - **A shared server.** Tennis doesn't have any authentication features, and should stay sandboxed on a single machine.
 - **Chinese, Japanese, and Korean languages.** The keyword index can't split those languages into words, however, semantic search should work. Follow along here: [issue #1](https://github.com/satoricorp/tennis/issues/1).
 - **Images, audio, and video.** Tennis indexes text only.
@@ -253,7 +257,7 @@ tennis serve                        # listens on 127.0.0.1:8817
 | Method | Path | Request body | Response |
 |---|---|---|---|
 | `GET` | `/health` | none | `{"status": "ok", "version": ..., "db": ...}` |
-| `GET` | `/v1/namespaces` | none | list of namespaces with counts |
+| `GET` | `/v1/namespaces` | none | list of namespaces with counts, or `null` when there are none |
 | `POST` | `/v1/namespaces/{ns}/write` | `{"documents": [{"id", "text", "attributes"}]}` | `{"written", "skipped", "chunks"}` |
 | `POST` | `/v1/namespaces/{ns}/query` | `{"text", "top_k", "mode", "where"}` | `{"results": [...]}` |
 | `POST` | `/v1/namespaces/{ns}/delete` | `{"ids": [...]}` | `{"deleted": n}` |
@@ -265,7 +269,7 @@ curl -s localhost:8817/v1/namespaces/notes/write -d '{"documents": [{"id": "a1",
 curl -s localhost:8817/v1/namespaces/notes/query -d '{"text": "keep me signed in", "top_k": 5}'
 ```
 
-**3. The CLI from scripts.** Add `--json` to `search`, `ls`, `add`, `rm`, or `ns` for machine-readable output on stdout. To add documents that aren't files, pipe newline-delimited JSON into `add --ndjson`, one document per line:
+**3. The CLI from scripts.** Add `--json` to `search`, `ls`, `add`, or `rm` for machine-readable output on stdout. `ns list` and `ns rm` honor it too. `ns create` prints plain text. To add documents that aren't files, pipe newline-delimited JSON into `add --ndjson`, one document per line:
 
 ```bash
 echo '{"id": "e1", "text": "deploy failed with a connection timeout", "attributes": {"kind": "event"}}' \
@@ -370,11 +374,11 @@ File structure:
 | `infra/` | the download host for releases (AWS CDK) |
 | `scripts/` | the installer and CI helper scripts |
 
-[open an issue](https://github.com/satoricorp/tennis/issues).
+Questions and bugs go in [an issue](https://github.com/satoricorp/tennis/issues).
 
 # Thanks
 
-- [Minish Lab](https://github.com/MinishLab/model2vec), for model2vec and  models that make embeddings possible.
+- [Minish Lab](https://github.com/MinishLab/model2vec), for model2vec and the models that make embeddings possible.
 - [SQLite](https://sqlite.org) and its [FTS5](https://sqlite.org/fts5.html) extension for keyword search.
 - [sugarme/tokenizer](https://github.com/sugarme/tokenizer), for tokenizers in Go.
 - [modernc.org/sqlite](https://gitlab.com/cznic/sqlite), for SQLite in Go.
