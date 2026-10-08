@@ -39,7 +39,7 @@ Install one binary, point it at a folder, ask it a question. No API key, no serv
 A release binary really is one file:
 
 ```bash
-curl -sL https://github.com/satoricorp/tennis/releases/download/v0.1.0/tennis_0.1.0_$(uname -s | tr '[:upper:]' '[:lower:]')_$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/').tar.gz | tar xz tennis
+curl -sL https://github.com/satoricorp/tennis/releases/download/v0.2.0/tennis_0.2.0_$(uname -s | tr '[:upper:]' '[:lower:]')_$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/').tar.gz | tar xz tennis
 ```
 
 Or with Go:
