@@ -1,607 +1,384 @@
-# tennis
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset=".github/assets/tennis-logo-dark.png">
+    <img src=".github/assets/tennis-logo-light.png" alt="Tennis" width="226">
+  </picture>
+</p>
 
-**Local search that actually finds things. One binary, one file, no server.**
+<p align="center">
+  <a href="https://github.com/satoricorp/tennis/actions/workflows/ci.yml"><img src="https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/satoricorp/tennis/badges/tests.json" alt="Tests passing"></a>
+  <a href="https://github.com/satoricorp/tennis/actions/workflows/ci.yml"><img src="https://github.com/satoricorp/tennis/actions/workflows/ci.yml/badge.svg?branch=main" alt="CI"></a>
+  <a href="https://github.com/satoricorp/tennis/releases"><img src="https://img.shields.io/github/v/release/satoricorp/tennis" alt="Latest release"></a>
+  <a href="https://pkg.go.dev/github.com/satoricorp/tennis"><img src="https://pkg.go.dev/badge/github.com/satoricorp/tennis.svg" alt="Go reference"></a>
+  <img src="https://img.shields.io/github/go-mod/go-version/satoricorp/tennis" alt="Go version">
+  <a href="LICENSE"><img src="https://img.shields.io/github/license/satoricorp/tennis" alt="License"></a>
+</p>
 
-Search your notes, docs, or agent history by keyword *and* by meaning at the same time — so "keep me signed in" finds the page about session cookies, even though they share no words.
+# Tennis
 
-For the database-inclined: this is the sqlite-vec idea — vectors living in a SQLite file you own — plus the parts you can't easily get from sqlite-vec alone: BM25 keyword search fused with semantic search into one ranking, and the embedding model itself shipped inside the binary, so semantic search works with no pipeline and no API key. Details in [Compared to sqlite-vec](#compared-to-sqlite-vec).
+Tennis is a command-line tool and Go library for searching text on your own computer. You give it files or your AI chat history, and it stores everything in one SQLite file. Each search looks for your exact words and for passages with the same meaning, then merges both into one ranked list, with no server and no API key.
 
-- **Nothing to install.** One static binary. No Python, no Node, no Docker, no Homebrew step, no database extension to compile. Download and run.
-- **Works offline, costs nothing.** The embedding model ships with it and runs on your machine. No API key, no network, no per-query bill.
-- **Finds things two ways at once.** BM25 keyword search (SQLite FTS5) catches names, IDs, and rare terms. Semantic search (embedding vectors, cosine) catches paraphrases. You get one list fusing both by reciprocal rank.
-- **Your data stays a file.** Everything lives in one SQLite database you can copy, back up, inspect with `sqlite3`, or delete.
-- **Same on Mac and Linux.** Identical binary behavior, no platform-specific setup.
-- **Use it however you want.** Command line, Go library, or a local HTTP API for every other language.
-- **Won't lie to you.** If something changes that would make results silently wrong, it stops and tells you instead.
+[Documentation](https://satoricorp.github.io/tennis/docs) · [Discord](https://discord.gg/JpAggvxJJ)
 
-```bash
-tennis add ~/Documents/notes
-tennis search "keep me signed in"
-```
-
-📖 **[Documentation](https://satoricorp.github.io/tennis/docs)** · [Discord](https://discord.gg/JpAggvxJJ) · [llms.txt](https://satoricorp.github.io/tennis/docs/llms.txt)
-
----
+# Getting Started
 
 ## Install
 
-Grab a binary from [Releases](https://github.com/satoricorp/tennis/releases) — it really is one file:
+Tennis runs on macOS and Linux, on Intel/AMD (`amd64`) and ARM (`arm64`). Pick one of these three ways.
 
-```bash
-curl -sL https://github.com/satoricorp/tennis/releases/download/v0.1.0/tennis_0.1.0_$(uname -s | tr '[:upper:]' '[:lower:]')_$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/').tar.gz | tar xz tennis
-```
-
-Or with Go:
+**Option 1: with Go** (needs Go 1.25 or newer)
 
 ```bash
 go install github.com/satoricorp/tennis/cmd/tennis@latest
 ```
 
-Or build it:
+This puts `tennis` in `$(go env GOPATH)/bin`. That folder must be on your `PATH`.
+
+**Option 2: download a release**
 
 ```bash
-git clone https://github.com/satoricorp/tennis && cd tennis && CGO_ENABLED=0 go build -o tennis ./cmd/tennis
+VERSION=0.2.0                                               # the newest version on the Releases page
+OS=$(uname -s | tr '[:upper:]' '[:lower:]')                 # darwin or linux
+ARCH=$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/')   # amd64 or arm64
+curl -fL -o tennis.tar.gz "https://github.com/satoricorp/tennis/releases/download/v${VERSION}/tennis_${VERSION}_${OS}_${ARCH}.tar.gz"
+tar -xzf tennis.tar.gz tennis
+mkdir -p ~/.local/bin && mv tennis ~/.local/bin/            # any folder on your PATH works
 ```
 
-`CGO_ENABLED=0` is not a suggestion — it is the whole point. tennis uses a pure-Go SQLite driver and a static embedding model, so the result is one self-contained binary with no shared libraries to find at runtime.
-
-On first use it downloads the embedding model once (~123MB) to `~/.cache/tennis`. After that it never touches the network.
-
----
-
-## Quick start
+**Option 3: build from source**
 
 ```bash
-# index a directory (creates the namespace on first run)
-$ tennis add ~/Documents/notes
-tennis: created namespace "context" bound to builtin:potion-retrieval-32M
-tennis: ~/Documents/notes: reading plain files
-imported 3, skipped 0 unchanged, 3 chunks in "context"
-
-# search it — one answer, in full
-$ tennis search "keep me signed in"
-> # Session handling
-  Make the login flow remember the user between sessions. The session cookie
-  is set with an expiry so the browser keeps it after the tab closes.
-
-  auth.md [2026-08-10] 0.0328
-
-# ask for more when comparing is the point
-$ tennis search "keep me signed in" -k 2
- 1. auth.md [2026-08-10] 0.0328  [kw#1 sem#1]
-    # Session handling
-    Make the login flow remember the user between sessions. The session cookie
-    is set with an expiry so the browser keeps it after the tab closes.
-
- 2. config.md [2026-08-10] 0.0161  [sem#2]
-    # Configuration
-    Write a parser for TOML configuration files. Values from the file are
-    merged over the defaults.
-
-# re-indexing is nearly free: unchanged files are never re-embedded
-$ tennis add ~/Documents/notes
-imported 0, skipped 3 unchanged, 0 chunks in "context"
-```
-
-One result, printed whole: the words, then where they came from and when. You asked a question, so you get an answer you can actually read, wrapped to your terminal — not ten truncated lines to squint at.
-
-`-k` is how you ask for more, and then every result is numbered — the best one included — because at that point you are reading a ranking rather than an answer. The `[kw#1 sem#1]` tag shows which ranker found each one and where: a hit only one ranker surfaced is a different kind of answer than one both agreed on, and tennis shows you which you got.
-
-Neither command named a namespace, so both used `context`, the default. That is the whole story until you want to keep separate things separate; then `--ns work` on either command, or `$TENNIS_NS`, does it.
-
-Nothing to index yet? Start with the history you already have — point [`add`](#add--index-sessions-or-files) at a ChatGPT or Claude export zip, or at `~/.claude` or `~/.codex`, and search it in one command.
-
----
-
-## CLI
-
-### `add` — index sessions or files
-
-`add` is the one way in. Point it at an export archive, a directory of local agent transcripts, or a pile of files, and it works out what it was handed:
-
-```bash
-tennis add ~/Downloads/chatgpt-export.zip     # a ChatGPT data export
-tennis add ~/Downloads/claude-export.zip      # a Claude data export
-tennis add ~/.claude                          # local Claude Code sessions
-tennis add ~/.codex                           # local Codex sessions
-tennis add ./docs                             # a directory tree of files
-tennis add ./a.md ./b.md                      # specific files
-```
-
-Detection reads the source rather than the filename: the ChatGPT and Claude exports are told apart by the shape of their `conversations.json`, and the two agent transcript formats by the fields on each line of their `.jsonl` — Claude Code writes a `uuid` and `sessionId`, Codex wraps everything in a `{timestamp, type, payload}` envelope. When the guess is wrong, or you would rather be explicit, name the source:
-
-```bash
-tennis add --chatgpt ~/Downloads/export.zip
-tennis add --claude ~/Downloads/export.zip
-tennis add --claude-code ~/.claude
-tennis add --codex ~/.codex
-tennis add --files ~/Documents/notes
-```
-
-A `.zip`, an already-unzipped directory, and a single transcript are all acceptable. Other useful flags:
-
-```bash
-tennis add ./src --files --ext .go,.ts,.rs    # only these extensions (default: everything with text)
-tennis add ./docs --chunk 2000                # bigger chunks for a new namespace
-tennis add ~/.codex --ns work                 # a namespace other than the default
-tennis add ./docs --json                      # machine-readable
-```
-
-Importing history exists because the alternative doesn't cover the past. Capturing conversations live — pointing a client at a proxy or a custom base URL — only ever sees traffic from the moment it is configured. For ChatGPT and claude.ai, everything before that is in the export archive and nowhere else, so that archive is the thing tennis reads. Claude Code and Codex are kinder: they keep their transcripts on your disk already, under `~/.claude` and `~/.codex`, and tennis reads them where they sit.
-
-By default each message becomes its own document, which is the unit you tend to remember; `--per conversation` makes each thread one document instead, for when the thread matters more than the line.
-
-```bash
-$ tennis add ~/Downloads/claude-export.zip
-tennis: created namespace "context" bound to builtin:potion-retrieval-32M
-tennis: ~/Downloads/claude-export.zip: reading a Claude export (conversations.json, projects.json)
-tennis: 5000 documents in…
-imported 11423, skipped 0 unchanged, 14106 chunks in "context"
-
-$ tennis search "that thing about session cookies"
-> a session cookie with a refresh token is the usual shape…
-  Claude [2025-03-15] 0.0328
-```
-
-Every document carries the attributes needed to find its way home — `source`, `session`, `role`, `title`, `created`, and for local sessions `project`, `cwd`, `branch` and, for a session run in a Claude Code worktree, `worktree` — so a search can be narrowed the same way any other namespace can:
-
-```bash
-tennis search "retry logic" --where role=user
-tennis search "flaky test" --where project=tennis,branch=main
-tennis search "the timeout" --where source=codex
-```
-
-Re-running `add` is an incremental update, and re-adding the same source is free. File documents are keyed by path and skipped when contents and metadata are byte-identical to what is stored — not re-read into the model, not re-indexed — which is why re-adding a large corpus after editing one file takes about as long as indexing one file. Session documents are keyed by the export's own conversation and message IDs, so a fresh export months later writes only what is new.
-
-`add` reads every file in a folder that has text in it. Plain text of any kind — notes, code, JSON, CSV — is indexed as it is. Spreadsheets, Word and PowerPoint files, HTML, and EPUB books are read by tennis itself, with the standard library: a workbook sheet by sheet with one row per line and its dates as dates, a document paragraph by paragraph, a deck slide by slide, a book chapter by chapter in reading order. PDFs are read with `pdftotext` when it is installed and otherwise, on a Mac, by Spotlight's own importer; RTF, the older Office formats, Pages, Numbers, Keynote, and email are read through macOS the same way. On a machine with no reader for a format, the file is skipped with a note saying what to install.
-
-Photos, audio, video, and archives are passed over without comment, as are dotfiles and anything under a dot directory. So are the folders a code project fills with what nobody there wrote — `node_modules`, `vendor`, `target`, `dist`, `build`, `__pycache__`, `site-packages` — and whatever a `.gitignore` inside the folder names, so `tennis add ~/code/project` reads the project, not its dependencies and build output; the summary line counts the folders passed over. Only `.gitignore` files inside the folder you name are read, not those above it or git's global excludes, and only for plain files: a `~/.claude` kept in git still has its transcripts read. The folder you name is always read, whatever it is called, so `tennis add ./vendor` reads `./vendor`. Anything else that turns out to be binary, and any text file over 10MB (at that size it's a log or a dataset, not prose), is skipped with a note on stderr. Binary detection is a NUL-byte check in the leading 8KB, the same heuristic git uses.
-
-Every conversation and every file also gets a card: a markdown summary in `~/tennis` (`--cards <dir>`, or `$TENNIS_CARDS`), with prose from `ANTHROPIC_API_KEY` or `OPENAI_API_KEY` when one is set and the opening of the thread or file when not. A file's card is named after the file, so re-adding a folder updates its cards in place. Cards are never read back into the index, so they are safe to edit, move, or delete. Adding a source again leaves a card alone unless what it describes changed, the card is gone, or it carries the opening and a key is now set, so a re-add makes no model calls for what is already summarized; `--no-cards` skips them.
-
-A card ends with the command that prints the rest: `tennis search --where 'session=<id>'` for a conversation, `tennis search --where 'path=<file>'` for a file. Given a filter and no query, `search` prints every match in full and in order, without ranking anything.
-
-Two things are deliberately left out of session imports. Local transcripts are indexed from their text and thinking, not their tool calls and tool results — those are mostly whole file reads and command output, and letting them in would mean every search ranked file contents above what was said about them. A Codex rollout records each exchange twice, once as raw model traffic carrying the harness preamble and once as the events the interface showed; tennis reads the second, because what you remember saying is what you typed. ChatGPT messages the exporter marked as hidden are skipped for the same reason: they were never on screen.
-
-### `add --ndjson` — ingest documents that aren't files
-
-Every other source names a path; `--ndjson` is for content that never touched disk — event lines, chat turns, agent claims, anything a program produces rather than a file. It reads newline-delimited JSON from stdin, one document per line:
-
-```bash
-echo '{"id": "e1", "text": "deploy failed with a connection timeout", "attributes": {"kind": "event", "session": "s1"}}' \
-  | tennis add --ndjson --ns agents
-
-tennis add --ndjson --ns agents < events.ndjson        # a whole batch at once
-tennis add --ndjson --ns agents --openai text-embedding-3-small < events.ndjson
-tennis add --ndjson --ns agents --json < events.ndjson # machine-readable
-```
-
-Each line is `{"id": "...", "text": "...", "attributes": {...}}` — `attributes` is optional, everything else follows the rest of `add`: the namespace is created on first use bound to the builtin model (or `--openai <model>`), and a document whose text and attributes are byte-identical to what's stored is skipped rather than re-embedded. No cards are written, because these documents are neither conversations nor files.
-
-A line that isn't valid JSON, or is missing `id` or `text`, is reported to stderr with its line number and does not stop the batch; the command exits nonzero if any line failed.
-
-```
-$ tennis add --ndjson --ns agents --json < events.ndjson
-tennis: ndjson: line 14: missing "id"
-{"written": 40, "skipped": 3, "chunks": 51, "failed": 1}
-```
-
-### `search` — search
-
-```bash
-tennis search "exponential backoff"
-tennis search "keep me signed in" -k 5             # top 5, not just the best
-tennis search "retry" --mode keyword               # BM25 only
-tennis search "retry" --mode semantic              # vectors only
-tennis search "auth" --where 'status=merged'       # filter by attribute
-tennis search "auth" --where 'cost>5,status!=failed'
-tennis search "auth" --ns work                     # a namespace other than the default
-tennis search "auth" --json                        # full results with scores and attributes
-```
-
-`--json` output includes each hit's stored `attributes`, not just its text and score:
-
-```json
-[
-  {
-    "id": "e1",
-    "score": 0.0328,
-    "text": "deploy failed with a connection timeout",
-    "attributes": {"kind": "event", "session": "s1"},
-    "keyword_rank": 1,
-    "semantic_rank": 1
-  }
-]
-```
-
-### `ls` — see what's there
-
-```bash
-tennis ls                          # sessions and files, newest first
-tennis ls chatgpt                  # one source, short for --where source=chatgpt
-tennis ls --where project=tennis   # filter by any attribute
-tennis ls --docs                   # every document, one row each
-tennis ls -n 0                     # all of it, not just the newest 25
-tennis ls --json
-```
-
-```
-$ tennis ls
-DATE             SOURCE         DOCS  TITLE
-2026-08-17 09:00 claude-code      14  Key rotation
-2026-08-12 09:00 file              1  config.md
-2026-08-10 09:00 file              1  auth.md
-2026-08-09 14:32 chatgpt           2  Wash sales
-
-4 sessions and files
-```
-
-A conversation is one row however many turns it was stored as, and `DOCS` is how many. A file has no session, so it is a row of its own, dated by when it was last modified and listed among the conversations by date — after the quick start above, `tennis ls` lists the three notes. `--docs` drops the grouping and lists every document, one row per turn and per file. `--sort <attribute>` and `--asc` change the order; `-n` and `--offset` page through.
-
-`ls` reads metadata only, never the text, so it stays fast on an archive that is mostly transcript. With `--json` it prints the same rows; a file's row is marked `"ungrouped": true` and carries the file's own attributes.
-
-### `ns` — namespaces
-
-```bash
-tennis ns list
-tennis ns create agents                               # built-in model
-tennis ns create agents --openai text-embedding-3-small
-tennis ns rm agents                                   # and every document in it
-```
-
-```
-$ tennis ns list
-NAMESPACE            EMBEDDER                               DIMS     DOCS   CHUNKS
-notes                builtin:potion-retrieval-32M            512      412     1908
-agents               openai:text-embedding-3-small          1536       88      340
-```
-
-`ns rm` removes the namespace and everything written to it. It says what that
-costs before it does it:
-
-```
-$ tennis ns rm agents
-tennis: removing "agents" takes its 88 documents (340 chunks) with it
-removed "agents"
-```
-
-### `rm`, `serve`
-
-```bash
-tennis rm /abs/path/to/auth.md                 # delete documents from the default namespace
-tennis rm e1 e2 --ns agents                    # ...or from a named one
-tennis serve                                   # local HTTP API on 127.0.0.1:8817
-```
-
-### Common flags
-
-| Flag | Meaning |
-|---|---|
-| `--db <path>` | database file (default `~/.tennis/db.sqlite`, or `$TENNIS_DB`) |
-| `--ns <name>` | namespace for `add`, `ls`, `search` and `rm` (default `context`, or `$TENNIS_NS`) |
-| `--json` | machine-readable output on stdout; progress goes to stderr |
-| `-k <n>` | how many results (`search` only, default 1; `-n` is an alias) |
-| `--mode` | `hybrid` (default), `keyword`, `semantic` |
-| `--where` | attribute filter: `key=value`, `key>value`, `key!=value`, comma-separated |
-| `--format` | override source detection (`add` only): `chatgpt`, `claude`, `claude-code`, `codex`, `files` |
-| `--per` | document granularity (`add` only): `turn` (default) or `conversation` |
-
-### Naming the namespace positionally
-
-`add` and `search` take the namespace as a flag so that the common case needs no namespace at all. Three older commands take it as the first argument instead, and still work:
-
-```bash
-tennis seed notes ./docs                       # like tennis add --files ./docs --ns notes
-tennis import history ~/Downloads/export.zip   # like tennis add ~/Downloads/export.zip --ns history
-tennis match notes "keep me signed in"         # like tennis search "keep me signed in" --ns notes
-```
-
----
-
-## Go SDK
-
-```go
-package main
-
-import (
-    "context"
-    "fmt"
-    "log"
-
-    "github.com/satoricorp/tennis"
-)
-
-func main() {
-    ctx := context.Background()
-
-    db, err := tennis.Open("~/.tennis/db.sqlite")
-    if err != nil {
-        log.Fatal(err)
-    }
-    defer db.Close()
-
-    // The embedder is chosen here, once, and bound to the namespace forever.
-    ns, err := db.CreateNamespace(ctx, "agents", tennis.NamespaceOptions{})
-    if err != nil {
-        log.Fatal(err)
-    }
-
-    _, err = ns.Write(ctx, []tennis.Document{
-        {
-            ID:         "a1",
-            Text:       "make the login flow remember the user between sessions",
-            Attributes: map[string]any{"status": "merged", "cost": 4},
-        },
-        {
-            ID:         "a2",
-            Text:       "write a parser for TOML configuration files",
-            Attributes: map[string]any{"status": "open", "cost": 8},
-        },
-    })
-    if err != nil {
-        log.Fatal(err)
-    }
-
-    results, err := ns.Query(ctx, tennis.Query{
-        Text:   "keep me signed in",
-        TopK:   5,
-        Filter: tennis.Eq("status", "merged"),
-    })
-    if err != nil {
-        log.Fatal(err)
-    }
-
-    for _, r := range results {
-        fmt.Printf("%.4f  %s  (kw#%d sem#%d)\n  %s\n",
-            r.Score, r.ID, r.KeywordRank, r.SemanticRank, r.Text)
-    }
-}
-```
-
-### Opening an existing namespace
-
-```go
-ns, err := db.Namespace(ctx, "agents")   // rebuilds the bound embedder
-if err != nil {
-    log.Fatal(err)   // including: bound to a model you can no longer load
-}
-fmt.Println(ns.EmbedderID())   // builtin:potion-retrieval-32M
-```
-
-### Filters
-
-```go
-tennis.Eq("status", "merged")
-tennis.NotEq("status", "failed")
-tennis.In("status", "merged", "open")
-tennis.Gt("cost", 5)
-tennis.Gte("cost", 5)
-tennis.Lt("cost", 100)
-tennis.Lte("cost", 100)
-tennis.Glob("path", "*/internal/*")
-
-tennis.And(tennis.Eq("status", "merged"), tennis.Gt("cost", 5))
-tennis.Or(tennis.Eq("status", "merged"), tennis.Eq("status", "open"))
-```
-
-Filters run before ranking, so a filtered query is faster than an unfiltered one.
-
-### Search modes
-
-```go
-ns.Query(ctx, tennis.Query{Text: "retry backoff"})                        // hybrid (default)
-ns.Query(ctx, tennis.Query{Text: "retry backoff", Mode: tennis.Keyword})  // BM25 only
-ns.Query(ctx, tennis.Query{Text: "retry backoff", Mode: tennis.Semantic}) // vectors only
-
-// tuning knobs — leave these alone unless you are measuring something
-ns.Query(ctx, tennis.Query{
-    Text:           "retry backoff",
-    RRFK:           60,   // fusion constant; lower favors each ranker's top hits
-    CandidateDepth: 100,  // chunks per ranker before fusion
-})
-```
-
-### Deleting and updating
-
-```go
-// Writing the same ID again replaces the document and reindexes it.
-ns.Write(ctx, []tennis.Document{{ID: "a1", Text: "new text"}})
-
-n, err := ns.Delete(ctx, []string{"a1", "a2"})   // n = how many existed
-
-doc, err := ns.Get(ctx, "a1")
-```
-
----
-
-## HTTP API — for every other language
-
-```bash
-tennis serve                       # 127.0.0.1:8817
-tennis serve --addr 127.0.0.1:9000
-```
-
-```bash
-# write
-curl -s localhost:8817/v1/namespaces/notes/write -d '{
-  "documents": [
-    {"id": "a1", "text": "make the login flow remember the user",
-     "attributes": {"status": "merged"}}
-  ]
-}'
-# {"written":1,"skipped":0,"chunks":1}
-
-# query
-curl -s localhost:8817/v1/namespaces/notes/query -d '{
-  "text": "keep me signed in", "top_k": 5, "where": "status=merged"
-}'
-# {"results":[{"id":"a1","score":0.0164,"text":"...","attributes":{"status":"merged"},"keyword_rank":0,"semantic_rank":1}]}
-
-# list namespaces
-curl -s localhost:8817/v1/namespaces
-
-# delete
-curl -s localhost:8817/v1/namespaces/notes/delete -d '{"ids": ["a1"]}'
-```
-
-Python client, in full:
-
-```python
-import requests
-
-BASE = "http://localhost:8817/v1"
-
-def write(ns, docs):
-    return requests.post(f"{BASE}/namespaces/{ns}/write", json={"documents": docs}).json()
-
-def match(ns, text, top_k=10, where=""):
-    r = requests.post(f"{BASE}/namespaces/{ns}/query",
-                      json={"text": text, "top_k": top_k, "where": where})
-    r.raise_for_status()
-    return r.json()["results"]
-
-write("notes", [{"id": "a1", "text": "make the login flow remember the user"}])
-for hit in match("notes", "keep me signed in"):
-    print(f'{hit["score"]:.4f}  {hit["id"]}  {hit["text"][:60]}')
-```
-
-TypeScript client, in full:
-
-```ts
-const BASE = "http://localhost:8817/v1";
-
-export async function write(ns: string, documents: unknown[]) {
-  const r = await fetch(`${BASE}/namespaces/${ns}/write`, {
-    method: "POST",
-    body: JSON.stringify({ documents }),
-  });
-  if (!r.ok) throw new Error(await r.text());
-  return r.json();
-}
-
-export async function match(ns: string, text: string, topK = 10, where = "") {
-  const r = await fetch(`${BASE}/namespaces/${ns}/query`, {
-    method: "POST",
-    body: JSON.stringify({ text, top_k: topK, where }),
-  });
-  if (!r.ok) throw new Error(await r.text());
-  return (await r.json()).results;
-}
-
-await write("notes", [{ id: "a1", text: "make the login flow remember the user" }]);
-console.log(await match("notes", "keep me signed in"));
-```
-
-The server binds to loopback and has no authentication, because it is an interface to a local file rather than a service. `--addr` will bind anywhere you tell it to; don't, unless you have put something in front of it.
-
----
-
-## Embedders
-
-### The built-in model
-
-`potion-retrieval-32M`, a static embedding model: a lookup table of vectors rather than a neural network. Embedding a string is a tokenize, a table lookup, and an average — no inference engine, no ONNX runtime, no cgo. That is what lets tennis be one static binary.
-
-It is genuinely weaker than a large hosted model — roughly 82% of `all-MiniLM-L6-v2` on retrieval benchmarks, which is itself behind OpenAI's. In a hybrid ranking that gap narrows considerably, because the queries a static model handles worst (exact identifiers, rare tokens, code symbols) are exactly the ones BM25 handles best.
-
-It also has no context window, so unlike a transformer-based embedder it will never silently ignore everything past token 512.
-
-`potion-base-8M` (29MB, 256 dims) is available via `--model potion-base-8M` if download size matters more than quality.
-
-### Turning on OpenAI
-
-```bash
-export OPENAI_API_KEY=sk-...
-tennis ns create notes --openai text-embedding-3-small
-```
-
-```go
-db.CreateNamespace(ctx, "notes", tennis.NamespaceOptions{
-    OpenAIModel: "text-embedding-3-small",
-})
-```
-
-**You have to ask for this.** tennis will not check for `OPENAI_API_KEY` and quietly use it.
-
-That restraint is deliberate. Vectors from two different models live in different spaces and different dimensions — a cosine between them is not a worse score, it is a meaningless one. If the embedder were chosen by whichever environment variables happened to be set, a namespace indexed with a key present and later queried from a cron job, a different shell, or CI would return confident nonsense. No error, no crash, just wrong answers that look right. That is the worst failure a search tool can have, so it is designed out rather than documented around.
-
-Choosing OpenAI also gives up two of the three things tennis promises: it is no longer offline, and no longer free.
-
-### How the binding is enforced
-
-Every namespace records its embedder's ID and dimension at creation. Every later open verifies the live embedder against those, and refuses on mismatch:
-
-```
-namespace "notes" was indexed with builtin:potion-retrieval-32M (512 dims) but the
-loaded embedder is openai:text-embedding-3-small (1536 dims); reindex the
-namespace or restore the original model
-```
-
-To change models, create a new namespace and re-index it. That is a real cost, and it is meant to be — it makes the expensive operation visible instead of letting it happen by accident.
-
----
-
-## How it works
-
-```
-your text
-   ├── chunked (~1000 chars, 100 overlap, split on paragraph/sentence boundaries)
-   ├── FTS5 index ────────► BM25 ranking ──┐
-   └── static embedder ───► cosine ranking ─┴──► reciprocal rank fusion ──► results
-                                                 stored in one SQLite file
-```
-
-**Why fuse by rank instead of by score.** BM25 scores and cosine similarities are on incomparable scales. Normalizing them into a weighted sum requires inventing an opinion about how a 0.7 cosine compares to a BM25 of −1.3, and that opinion is wrong for some corpus. Positions in a ranking are directly comparable and need no calibration, which is why reciprocal rank fusion is the default everywhere it's used.
-
-**Why brute-force vector search.** There is no approximate index. At 512 dimensions a single core compares a few million vectors per second, so exact search stays comfortably fast well past the point where you would move to a server anyway. Exactness means no recall cliff, no index to tune, and no parameters that quietly degrade results as the corpus grows.
-
-**Why chunking, given the model has no context limit.** A vector is the average of its tokens, so the longer the text the more it converges on the average of the language rather than the meaning of the passage. A ten-page document embeds to roughly nothing in particular. Chunking keeps each vector about one idea.
-
-**Why the FTS triggers matter.** SQLite's external-content FTS5 tables do not follow their source table automatically. Without triggers the index silently drifts on every update and delete — deleted documents keep matching, stale text keeps being returned, and nothing errors. tennis creates those triggers in the first migration, and there is a regression test that updates and deletes a document and asserts the old terms stop matching.
-
----
-
-## Compared to sqlite-vec
-
-[sqlite-vec](https://github.com/asg017/sqlite-vec) answers "where do my vectors live" — and deliberately leaves everything else to you. tennis makes the same core commitment (your index is one SQLite file you can open with `sqlite3`, copy, back up, or delete) and builds in the layers you would otherwise assemble around it:
-
-| | sqlite-vec | tennis |
-|---|---|---|
-| Vector storage, exact KNN | yes | yes |
-| Embeddings | bring your own | model ships in the binary, runs offline |
-| Keyword search | separate FTS5 setup | BM25 built in |
-| Hybrid ranking | hand-written fusion SQL | reciprocal rank fusion by default |
-| Loading it | compiled C extension (in Go: cgo) | pure Go, `CGO_ENABLED=0`, one static binary |
-| Chunking, incremental indexing | yours to write | built in |
-| Embedder/index mismatch | silently wrong results | refused at open, by design |
-
-If you want raw SQL over vectors inside a database you already have, use sqlite-vec — it is very good at exactly that. tennis is for when you want the whole retrieval loop — embed, chunk, index, fuse, filter — working in one command.
-
-## What it isn't
-
-- **Not an approximate-nearest-neighbor engine.** Exact scan only. If you have millions of vectors and need sub-millisecond search, use a vector database.
-- **Not a server.** No auth, no multi-tenancy, no replication. It's a file.
-- **Not a reranker.** Results come from BM25 and cosine fused; there is no cross-encoder pass.
-- **Not a relevance threshold.** Semantic search ranks everything, so a query always returns up to `TopK` results even when nothing is a good match. Use the score and the `kw#/sem#` tags to judge; a result found by only one ranker with a low score is usually noise.
-- **Not multimodal.** Text only.
-- **Not good at CJK keyword search.** The FTS5 tokenizer does not segment Chinese/Japanese/Korean, so the keyword ranker finds nothing for CJK queries; semantic search still works. Fixing this properly (a trigram tokenizer) changes the index schema, so it is tracked as an issue rather than patched quietly.
-
----
-
-## Development
-
-```bash
-go test ./...          # requires the model in testdata/cache; skips cleanly without it
-go vet ./...
+git clone https://github.com/satoricorp/tennis
+cd tennis
 CGO_ENABLED=0 go build -o tennis ./cmd/tennis
 ```
 
-The embedder has a correctness test that compares its output against the reference Python `model2vec` implementation vector-for-vector — cosine 1.00000000, max absolute difference 8e-9. A pooling bug or a vocabulary off-by-one produces embeddings that are merely mediocre rather than obviously broken, so this is checked against ground truth rather than eyeballed.
+`CGO_ENABLED=0` makes one self-contained binary with no C libraries. Tennis needs none.
 
-Model downloads are verified against SHA-256 checksums pinned in the source; a changed upstream file is refused rather than silently embedded into every vector the install ever produces.
+Check that it worked:
 
-Tests that need the 123MB model weights skip themselves when the weights are absent, so CI runs green without downloading them; the full suite (including the reference validation and fuzzing) runs wherever the weights exist.
+```bash
+tennis version
+```
 
-## License
+The first time you add something, Tennis downloads its embedding model once (about 123MB) into `~/.cache/tennis`. After that, search never uses the network.
 
-MIT
+To read PDFs on Linux, also install `pdftotext` (for example `sudo apt install poppler-utils`). On a Mac, Tennis uses `pdftotext` if you have it and the built-in Spotlight importer if you don't.
+
+# Examples
+
+## Basic Example
+
+Index a folder of notes:
+
+```bash
+$ tennis add ~/Documents/notes
+tennis: created namespace "context" bound to builtin:potion-retrieval-32M
+tennis: no ANTHROPIC_API_KEY or OPENAI_API_KEY; cards will carry the opening message instead of a summary
+tennis: /Users/you/Documents/notes: reading plain files
+imported 3, skipped 0 unchanged, 3 chunks in "context", 3 cards in /Users/you/tennis
+```
+
+What happened:
+
+- Tennis created a **namespace** called `context`. A namespace is a separate collection of documents, and `context` is the default one.
+- It read the 3 files, split them into chunks, and stored them in `~/.tennis/db.sqlite`.
+- It wrote one markdown summary **card** per file into `~/tennis`. The line about API keys is only about those cards; search never needs a key.
+
+Search it:
+
+```bash
+$ tennis search "keep me signed in"
+> # Session handling
+
+  Make the login flow remember the user between sessions. The session cookie is
+  set with an expiry so the browser keeps it after the tab closes.
+
+  auth.md [2026-10-08] 0.0328
+```
+
+You get the best match, printed in full. Under it are the file name, the file's date, and the score.
+
+Ask for more results with `-k`:
+
+```bash
+$ tennis search "keep me signed in" -k 3
+ 1. auth.md [2026-10-08] 0.0328  [kw#1 sem#1]
+    # Session handling
+
+    Make the login flow remember the user between sessions. The session cookie
+    is set with an expiry so the browser keeps it after the tab closes.
+
+ 2. retry.md [2026-10-08] 0.0161  [sem#2]
+    # Retries
+
+    Failed requests back off exponentially, doubling the delay each attempt up
+    to a cap of thirty seconds.
+
+ 3. config.md [2026-10-08] 0.0159  [sem#3]
+    # Configuration
+
+    Write a parser for TOML configuration files. Values from the file are merged
+    over the defaults.
+```
+
+The tag at the end of each line says which search found the result. `kw#1` means keyword search ranked it first. `sem#2` means meaning-based search ranked it second. `auth.md` was found by both, so it scores highest. The other two were found only by meaning, so treat them as weaker matches.
+
+Run `add` again and unchanged files are skipped:
+
+```bash
+$ tennis add ~/Documents/notes
+tennis: no ANTHROPIC_API_KEY or OPENAI_API_KEY; cards will carry the opening message instead of a summary
+tennis: /Users/you/Documents/notes: reading plain files
+imported 0, skipped 3 unchanged, 0 chunks in "context"
+```
+
+List what is stored:
+
+```bash
+$ tennis ls
+DATE             SOURCE         DOCS  TITLE
+2026-10-08 14:09 file              1  auth.md
+2026-10-08 14:09 file              1  config.md
+2026-10-08 14:09 file              1  retry.md
+
+3 files
+```
+
+## Full Example
+
+This walks through the main features in order. Replace the paths with your own.
+
+```bash
+# 1. Import AI chat history. Tennis detects the format from the contents.
+tennis add ~/.claude                            # Claude Code sessions on this machine
+tennis add ~/.codex                             # Codex sessions on this machine
+tennis add ~/Downloads/chatgpt-export.zip       # a ChatGPT data export
+tennis add ~/Downloads/claude-export.zip        # a Claude.ai data export
+
+# 2. Keep work documents in their own namespace.
+tennis add ~/work/handbook --ns work
+
+# 3. See what is stored, newest first.
+tennis ls
+tennis ls chatgpt                               # only one source
+tennis ls --ns work
+
+# 4. Search, and narrow the search with attribute filters.
+tennis search "token refresh" -k 5
+tennis search "token refresh" --where project=tennis,branch=main
+tennis search "retry logic" --where role=user   # only things you typed
+tennis search "vacation policy" --ns work
+
+# 5. Choose one kind of search.
+tennis search "ERR_CONN_RESET" --mode keyword   # exact words only
+tennis search "the app forgets me" --mode semantic
+
+# 6. Read a whole conversation: give a filter and no query.
+tennis search --where session=7f3a2c10
+
+# 7. Get JSON for scripts.
+tennis search "token refresh" -k 5 --json
+
+# 8. Delete one document, then a whole namespace.
+tennis rm ~/work/handbook/old-policy.md --ns work
+tennis ns rm work
+```
+
+Some notes on what these commands do:
+
+- **Formats.** `add` works out what a path is. If it guesses wrong, name it with `--chatgpt`, `--claude`, `--claude-code`, `--codex`, or `--files`.
+- **Turns.** Chat history is stored one message per document, so a search finds the exact message. `tennis ls` groups messages back into one row per conversation.
+- **Attributes.** Every document carries attributes you can filter on with `--where`. Files have `path`, `name`, `size`, `modified`. Chat messages have `source`, `session`, `role`, `title`, `created`. Claude Code and Codex messages also have `project` (the repo the session started in), `cwd`, and `worktree` when there was one. Claude Code messages also have `branch`, and a subagent's turns have `subagent`.
+- **Filters.** `--where` takes `key=value`, `key!=value`, `key>value`, `key>=value`, `key<value`, `key<=value`, joined with commas (all must match). Put a value in double quotes when it contains a comma: `--where 'path="/Users/you/Budget, 2026.md"'`.
+- **Cards.** Every file and conversation also gets a markdown card in `~/tennis`. Set `ANTHROPIC_API_KEY` or `OPENAI_API_KEY` and each card gets a short summary written by a model. Without a key, the card holds the opening lines instead. A card's last line is the command that prints the whole record. Use `--no-cards` to skip cards, or `--cards <dir>` to put them elsewhere.
+- **Defaults.** The database is `~/.tennis/db.sqlite` (change it with `--db` or `$TENNIS_DB`). The namespace is `context` (change it with `--ns` or `$TENNIS_NS`).
+
+Run `tennis --help` for the main commands and `tennis --agents` for every command.
+
+# Details
+
+## What tennis is great for
+
+- **Searching your own files on one machine.** It finds exact terms (names, IDs, error codes) and paraphrases in the same search.
+- **Searching AI chat history.** It reads ChatGPT and Claude exports and the local Claude Code and Codex history, and none of it leaves your machine.
+- **Giving a program or AI agent a local memory.** Write documents in and query them back through the Go library, a local HTTP API, or the CLI with `--json`.
+- **Working offline.** The model runs on your machine. Search never calls an API.
+- **Collections up to about 100,000 chunks.** On an Apple M4, a search over about 117,000 chunks (74,000 chat messages) takes about 2 seconds.
+
+## What tennis is not great for
+
+- **Millions of documents, or answers in milliseconds.** Meaning-based search compares the query with every stored chunk. Time grows in step with the size of the collection.
+- **A shared server.** The HTTP API has no authentication. It is meant for programs on the same machine.
+- **Telling you when nothing matches.** There is no relevance cutoff. A search always returns up to `-k` results, even weak ones. Use the score and the `kw#`/`sem#` tags to judge.
+- **Chinese, Japanese, and Korean keyword search.** The keyword index can't split those languages into words, so keyword search finds nothing in them. Meaning-based search still works. This is tracked in [issue #1](https://github.com/satoricorp/tennis/issues/1).
+- **Images, audio, and video.** Tennis indexes text only. A scanned PDF with no text layer has nothing to index.
+- **The best possible meaning-based results.** The built-in model is small and fast, but weaker than large hosted models. You can switch a namespace to OpenAI embeddings (see below).
+- **Windows.** Only macOS and Linux are supported.
+
+## Embedding tennis with your application
+
+There are three ways to use Tennis from your own code.
+
+**1. Go library.** This is the same code as [`examples/basic`](examples/basic/main.go):
+
+```go
+import "github.com/satoricorp/tennis"
+
+db, err := tennis.Open("~/.tennis/db.sqlite")
+if err != nil {
+    log.Fatal(err)
+}
+defer db.Close()
+
+// Create a namespace once. Later, open it with db.Namespace(ctx, "agents").
+ns, err := db.CreateNamespace(ctx, "agents", tennis.NamespaceOptions{})
+
+// Write documents. Writing an existing ID replaces that document.
+_, err = ns.Write(ctx, []tennis.Document{
+    {ID: "a1", Text: "make the login flow remember the user between sessions",
+        Attributes: map[string]any{"status": "merged", "cost": 4}},
+})
+
+// Search.
+results, err := ns.Query(ctx, tennis.Query{
+    Text:   "keep me signed in",
+    TopK:   5,                             // default 10
+    Mode:   tennis.Hybrid,                 // or tennis.Keyword, tennis.Semantic
+    Filter: tennis.Eq("status", "merged"), // also NotEq, In, Gt, Gte, Lt, Lte, Glob, And, Or
+})
+for _, r := range results {
+    fmt.Println(r.ID, r.Score, r.KeywordRank, r.SemanticRank, r.Text)
+}
+```
+
+`Namespace` also has `Delete`, `Get`, `List`, and `Count`. The [API reference](https://pkg.go.dev/github.com/satoricorp/tennis) lists everything.
+
+**2. Local HTTP API.** For any other language. Start the server:
+
+```bash
+tennis serve                        # listens on 127.0.0.1:8817
+```
+
+| Method | Path | Request body | Response |
+|---|---|---|---|
+| `GET` | `/health` | none | `{"status": "ok", "version": ..., "db": ...}` |
+| `GET` | `/v1/namespaces` | none | list of namespaces with counts |
+| `POST` | `/v1/namespaces/{ns}/write` | `{"documents": [{"id", "text", "attributes"}]}` | `{"written", "skipped", "chunks"}` |
+| `POST` | `/v1/namespaces/{ns}/query` | `{"text", "top_k", "mode", "where"}` | `{"results": [...]}` |
+| `POST` | `/v1/namespaces/{ns}/delete` | `{"ids": [...]}` | `{"deleted": n}` |
+
+The first write to a namespace creates it. `where` uses the same syntax as the CLI's `--where`.
+
+```bash
+curl -s localhost:8817/v1/namespaces/notes/write -d '{"documents": [{"id": "a1", "text": "make the login flow remember the user"}]}'
+curl -s localhost:8817/v1/namespaces/notes/query -d '{"text": "keep me signed in", "top_k": 5}'
+```
+
+**3. The CLI from scripts.** Add `--json` to `search`, `ls`, `add`, `rm`, or `ns` for machine-readable output on stdout. To add documents that aren't files, pipe newline-delimited JSON into `add --ndjson`, one document per line:
+
+```bash
+echo '{"id": "e1", "text": "deploy failed with a connection timeout", "attributes": {"kind": "event"}}' \
+  | tennis add --ndjson --ns agents
+```
+
+## Supported file types
+
+| What | Files | Read by | Where it works |
+|---|---|---|---|
+| Plain text | any file whose contents are text: `.md`, `.txt`, `.go`, `.json`, `.csv`, a `Makefile`, … | Tennis | everywhere |
+| Office | `.docx`, `.pptx`, `.xlsx` | Tennis | everywhere |
+| Web pages and e-books | `.html`, `.htm`, `.xhtml`, `.epub` | Tennis | everywhere |
+| PDF | `.pdf` | `pdftotext`, or Spotlight on a Mac | macOS; Linux with `pdftotext` installed |
+| Rich text and older Word | `.rtf`, `.rtfd`, `.doc`, `.odt`, `.webarchive` | macOS `textutil` | macOS |
+| Apple iWork, older Office, email | `.pages`, `.numbers`, `.key`, `.xls`, `.ppt`, `.ods`, `.odp`, `.eml`, `.emlx` | macOS Spotlight | macOS |
+| ChatGPT history | a data export, as a `.zip` or unzipped folder | Tennis | everywhere |
+| Claude.ai history | a data export, as a `.zip` or unzipped folder, including project files | Tennis | everywhere |
+| Claude Code history | `~/.claude`, including subagent transcripts | Tennis | everywhere |
+| Codex history | `~/.codex` | Tennis | everywhere |
+| Program output | newline-delimited JSON on stdin, with `add --ndjson` | Tennis | everywhere |
+
+When you add a folder, Tennis skips these:
+
+- **Silently:** images, audio, video, archives, fonts, databases, empty files, dotfiles, and anything inside a folder whose name starts with a dot (such as `.git`).
+- **Silently, counted in the summary:** `node_modules`, `vendor`, `target`, `dist`, `build`, `__pycache__`, `site-packages`, application bundles, symbolic links to folders, and anything a `.gitignore` inside the folder lists. The folder you name yourself is always read.
+- **With a note on stderr:** other binary files, text files over 10MB, documents over 100MB, and formats with no reader on your machine.
+
+Use `--ext .go,.md` to read only some extensions.
+
+## Specifics about the vector architecture
+
+An **embedding** is a list of numbers that represents what a piece of text means. Texts with similar meanings get similar lists. Tennis stores one embedding per chunk of text and compares them with the embedding of your query.
+
+- **Model.** The default is [`potion-retrieval-32M`](https://huggingface.co/minishlab/potion-retrieval-32M) from Minish Lab. It is a *static* model: a table holding one 512-number vector for each token in its vocabulary. To embed a text, Tennis splits it into tokens, looks up each token's vector, averages them, and scales the result to length 1. No neural network runs, so Tennis needs no machine-learning runtime or C libraries.
+- **Download.** The model downloads once from Hugging Face into `~/.cache/tennis/models/`. Tennis checks the file against a SHA-256 checksum pinned in [`embed/models.go`](embed/models.go) and refuses a file that doesn't match.
+- **Quality.** On the MTEB retrieval benchmark the model scores 35.06, against 42.92 for the common `all-MiniLM-L6-v2`. Keyword search covers much of that gap, because the queries a small model handles worst (exact names, IDs, code) are the ones keyword search handles best.
+- **Other models.** `--model potion-base-8M` is smaller (256 numbers per vector, 29MB) and less accurate. `--openai text-embedding-3-small` (1536 numbers) or `--openai text-embedding-3-large` (3072) uses OpenAI instead. That needs `OPENAI_API_KEY` and sends your text to OpenAI.
+- **One model per namespace.** A namespace records its model and vector size when it is created. Opening it with a different model is an error, because vectors from different models cannot be compared. To change models, create a new namespace and add your files again.
+- **Chunks.** Each document is split into chunks of about 1,000 characters that overlap by 100. Splits fall on paragraph or sentence boundaries when possible. Each chunk gets its own vector, because the average of a long text's tokens says little about any one part of it.
+- **Storage.** Everything lives in one SQLite file, `~/.tennis/db.sqlite` by default. Documents, their attributes (as JSON), and their chunks are ordinary tables. Each chunk's vector is stored next to its text as 32-bit floats.
+- **Comparing vectors.** There is no approximate index. A search computes the cosine similarity between the query vector and every chunk vector in the namespace that passes the filters. Results are exact, and time grows in step with the number of chunks.
+- **Re-adding.** Each document stores a hash of its text and attributes. A document whose hash hasn't changed is skipped, not embedded again.
+
+## Specifics about tennis search
+
+Every search runs two searches and merges them.
+
+- **Keyword search** uses [BM25](https://en.wikipedia.org/wiki/Okapi_BM25) through SQLite's FTS5 full-text index. Words are reduced to their stems, so "running" matches "run". The query's words are joined with OR. Very common words such as "the" and "in" are dropped. Search operators typed in the query are treated as plain text.
+- **Meaning-based search** compares the query's vector with every chunk's vector, as described above.
+- **Each document counts once.** Both searches keep each document's best-matching chunk and take the top 100 documents.
+- **Merging** uses reciprocal rank fusion. A document's score is `1 / (60 + rank)` for each search that found it, added together. It uses ranks rather than raw scores because BM25 scores and cosine similarities are on different scales. Ranked first by both searches, a document scores 2/61 ≈ 0.0328. Ranked first by only one, it scores 1/61 ≈ 0.0164.
+- **The text shown** is the document's best-matching chunk, preferring the meaning-based search's choice when both found it.
+- **Modes.** `--mode hybrid` (the default) runs both searches. `--mode keyword` runs only BM25, and `--mode semantic` runs only the vector search.
+- **Filters** from `--where` run before either search, so a filtered search only looks at matching documents.
+- **Result count.** The CLI shows 1 result by default (`-k` for more). The Go library returns 10 by default (`TopK`).
+- **Reading instead of searching.** `tennis search --where ...` with no query prints every matching document in full, oldest first, instead of ranking anything.
+
+# Contributing
+
+You need Go 1.25 or newer, on macOS or Linux.
+
+1. Clone the repository and download the model the tests use. Without it, about 50 tests are skipped.
+
+   ```bash
+   git clone https://github.com/satoricorp/tennis
+   cd tennis
+   scripts/fetch-test-model.sh
+   ```
+
+2. Make your change, then run the same checks CI runs:
+
+   ```bash
+   go vet ./...
+   test -z "$(gofmt -l $(git ls-files '*.go'))"
+   go test ./...
+   CGO_ENABLED=0 go build -o tennis ./cmd/tennis
+   ```
+
+3. Write the commit subject as `area: what changed`, in lowercase, where the area is `cli`, `docs`, `www`, or `infra`. Use the body to explain why.
+
+Where things are:
+
+| Path | What it is |
+|---|---|
+| `*.go` (repository root) | the Go library: storage, chunking, search, filters |
+| `embed/` | the embedding models: built-in and OpenAI |
+| `summarize/` | the model calls that write card summaries |
+| `cmd/tennis/` | the command-line tool: importers, file readers, cards, the HTTP server |
+| `examples/basic/` | the Go example above, compiled by CI so it stays correct |
+| `docs/` | the documentation site (Next.js): `cd docs && npm install && npm run dev` |
+| `www/` | the project website (Next.js) |
+| `infra/` | the download host for releases (AWS CDK) |
+| `scripts/` | the installer and CI helper scripts |
+
+Ask questions in [Discord](https://discord.gg/JpAggvxJJ) or [open an issue](https://github.com/satoricorp/tennis/issues).
+
+# Thanks
+
+- [Minish Lab](https://github.com/MinishLab/model2vec), for model2vec and the potion models that make embeddings possible without a neural network.
+- [modernc.org/sqlite](https://gitlab.com/cznic/sqlite), for SQLite in pure Go, which keeps Tennis a single binary.
+- [SQLite](https://sqlite.org) and its [FTS5](https://sqlite.org/fts5.html) extension, which does the keyword search.
+- [sugarme/tokenizer](https://github.com/sugarme/tokenizer), for Hugging Face tokenizers in Go.
+- [sqlite-vec](https://github.com/asg017/sqlite-vec) by Alex Garcia, for the idea that vectors can live in a SQLite file you own.
+- Cormack, Clarke, and Büttcher, for [reciprocal rank fusion](https://plg.uwaterloo.ca/~gvcormac/cormacksigir09-rrf.pdf).
+- [Poppler](https://poppler.freedesktop.org), for `pdftotext`.
