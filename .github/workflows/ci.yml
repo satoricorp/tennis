@@ -29,15 +29,24 @@ jobs:
           path: testdata/cache
           key: test-model-${{ runner.os }}-${{ hashFiles('embed/models.go') }}
       - run: scripts/fetch-test-model.sh
+      # pdftotext is the only PDF reader tennis has on Linux, so the Linux
+      # run installs it to test that path rather than skip it.
+      - if: runner.os == 'Linux'
+        run: sudo apt-get update -q && sudo apt-get install -y --no-install-recommends poppler-utils
       - run: go test ./...
       - run: CGO_ENABLED=0 go build ./cmd/tennis
 
   # The README's "tests" badge: how much of the suite passed on main, run
   # with the model so nothing skips. shields.io reads the result from the
   # badges branch, which holds that one file and nothing else.
+  #
+  # It runs on macOS with pdftotext installed because that is the one
+  # machine where every test applies: the macOS converters exist nowhere
+  # else, and on Linux their tests can only skip, which the badge would
+  # rightly report.
   tests-badge:
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    runs-on: ubuntu-latest
+    runs-on: macos-latest
     permissions:
       contents: write
     # Two pushes close together would race to force-push the branch; the
@@ -55,6 +64,7 @@ jobs:
           path: testdata/cache
           key: test-model-${{ runner.os }}-${{ hashFiles('embed/models.go') }}
       - run: scripts/fetch-test-model.sh
+      - run: brew install poppler
       # A failing suite still gets a badge, a red one, so the test run's own
       # exit status does not stop the job.
       - run: go test -json ./... > results.json || true
